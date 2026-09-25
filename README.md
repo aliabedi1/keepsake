@@ -69,6 +69,11 @@ to stop Keepsake.
 
 ## Use
 
+Saved highlights appear in **Saved library** when Keepsake starts. Choose a
+saved profile and highlight to browse or export downloaded stories without an
+Instagram login or internet connection. Keep the local app running so it can
+serve the files from `downloads/`.
+
 1. Click **Connect Instagram**.
 2. Enter the Instagram username and password used to view the target profile.
 3. If the account uses two-factor authentication, enter its current code when

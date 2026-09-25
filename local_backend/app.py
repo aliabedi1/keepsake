@@ -1562,6 +1562,160 @@ def get_job(
     return dict(job)
 
 
+def saved_highlight_summary(directory: Path, user_id: str) -> dict[str, Any] | None:
+    manifest = read_json(directory / "manifest.json")
+    highlight_id = str(manifest.get("id", ""))
+    if not highlight_id:
+        return None
+    records = [
+        record for record in manifest.get("stories") or []
+        if isinstance(record, dict) and record.get("local_path") and record.get("size")
+    ]
+    if not records:
+        return None
+    cover = next(
+        (
+            record for record in records
+            if record.get("type") == "image" and record_file_is_valid(directory, record)
+        ),
+        None,
+    )
+    cover_url = (
+        f"http://127.0.0.1:8787/api/library/media/"
+        f"{user_id}/{highlight_id}/{cover['id']}"
+        if cover else ""
+    )
+    return {
+        "id": highlight_id,
+        "title": str(manifest.get("title", "")) or "Highlight",
+        "cover_url": cover_url,
+        "item_count": len(records),
+        "position": int(manifest.get("position", 0) or 0),
+        "local_status": "current",
+        "downloaded_count": len(records),
+        "removed_count": sum(bool(record.get("removed_from_instagram")) for record in records),
+        "failed_count": 0,
+        "last_updated_at": str(manifest.get("last_checked_at", "")),
+        "is_old": False,
+        "has_local": True,
+    }
+
+
+@app.get("/api/library")
+def list_saved_accounts() -> dict[str, Any]:
+    accounts = []
+    for directory in DOWNLOAD_ROOT.iterdir() if DOWNLOAD_ROOT.exists() else []:
+        if not directory.is_dir():
+            continue
+        profile = read_json(directory / "account.json").get("profile") or {}
+        if not isinstance(profile, dict) or not profile.get("id"):
+            continue
+        highlights_root = directory / "highlights"
+        saved_count = 0
+        for highlight_dir in highlights_root.iterdir() if highlights_root.exists() else []:
+            if not highlight_dir.is_dir():
+                continue
+            highlight = saved_highlight_summary(highlight_dir, str(profile["id"]))
+            if highlight:
+                saved_count += highlight["downloaded_count"]
+        if not saved_count:
+            continue
+        accounts.append({
+            "id": str(profile["id"]),
+            "username": str(profile.get("username", "")),
+            "full_name": str(profile.get("full_name", "")),
+            "downloaded_stories": saved_count,
+        })
+    accounts.sort(key=lambda account: account["username"].casefold())
+    return {"accounts": accounts}
+
+
+@app.get("/api/library/{user_id}")
+def get_saved_account(user_id: str, page: int = Query(default=1, ge=1)) -> dict[str, Any]:
+    account_dir = find_account_directory(user_id)
+    if not account_dir:
+        raise HTTPException(status_code=404, detail="That local account was not found.")
+    profile = read_json(account_dir / "account.json").get("profile") or {}
+    if not isinstance(profile, dict):
+        profile = {}
+    highlights_root = account_dir / "highlights"
+    highlights = []
+    for directory in highlights_root.iterdir() if highlights_root.exists() else []:
+        if not directory.is_dir():
+            continue
+        highlight = saved_highlight_summary(directory, user_id)
+        if highlight:
+            highlights.append(highlight)
+    highlights.sort(key=lambda highlight: (highlight["position"], highlight["id"]))
+    page_size = HIGHLIGHTS_PER_PAGE
+    total_pages = max(1, (len(highlights) + page_size - 1) // page_size)
+    if page > total_pages:
+        raise HTTPException(status_code=404, detail="That saved highlight page was not found.")
+    saved_count = sum(highlight["downloaded_count"] for highlight in highlights)
+    return {
+        "profile": {
+            "id": str(profile.get("id", user_id)),
+            "username": str(profile.get("username", "")),
+            "full_name": str(profile.get("full_name", "")),
+            "profile_pic_url": "",
+            "is_private": bool(profile.get("is_private", False)),
+            "downloaded_stories": saved_count,
+            "undownloaded_stories": 0,
+            "has_local": saved_count > 0,
+            "is_old": False,
+            "old_highlights": 0,
+            "last_updated_at": str(profile.get("last_updated_at", "")),
+        },
+        "highlights": highlights[(page - 1) * page_size:page * page_size],
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "total_highlights": len(highlights),
+        "total_stories": saved_count,
+    }
+
+
+@app.get("/api/library/{user_id}/highlights/{highlight_id}")
+def get_saved_highlight(user_id: str, highlight_id: str) -> dict[str, Any]:
+    account_dir = find_account_directory(user_id)
+    if not account_dir:
+        raise HTTPException(status_code=404, detail="That local account was not found.")
+    directory = find_highlight_directory(account_dir, highlight_id)
+    if not directory:
+        raise HTTPException(status_code=404, detail="That local highlight was not found.")
+    highlight = saved_highlight_summary(directory, user_id)
+    if not highlight:
+        raise HTTPException(status_code=404, detail="That highlight has no valid local files.")
+    manifest = read_json(directory / "manifest.json")
+    stories = []
+    for record in manifest.get("stories") or []:
+        if not isinstance(record, dict) or not record_file_is_valid(directory, record):
+            continue
+        media_url = (
+            f"http://127.0.0.1:8787/api/library/media/"
+            f"{user_id}/{highlight_id}/{record['id']}"
+        )
+        stories.append({
+            "id": str(record["id"]),
+            "position": int(record.get("position", 0) or 0),
+            "type": "video" if record.get("type") == "video" else "image",
+            "filename": str(record.get("filename", "")),
+            "source_url": media_url,
+            "preview_url": media_url,
+            "download_url": media_url + "?download=true",
+            "local_available": True,
+            "taken_at": str(record.get("taken_at", "")),
+            "removed_from_instagram": bool(record.get("removed_from_instagram")),
+        })
+    stories.sort(key=lambda story: (story["position"], story["id"]))
+    if not stories:
+        raise HTTPException(status_code=404, detail="That highlight has no valid local files.")
+    highlight["item_count"] = len(stories)
+    highlight["downloaded_count"] = len(stories)
+    highlight["removed_count"] = sum(story["removed_from_instagram"] for story in stories)
+    return {"highlight": highlight, "stories": stories}
+
+
 @app.get("/api/library/{user_id}/export")
 def export_library(
     user_id: str,

@@ -169,6 +169,15 @@ body {
   background: light-dark(#71376f, #76417a);
 }
 
+.offline-shortcut {
+  color: #fff8fc;
+  background: light-dark(#5d2d63, #653568);
+}
+
+.offline-shortcut:hover {
+  background: light-dark(#71376f, #76417a);
+}
+
 .profile-actions .remaining-count {
   background: light-dark(#ffffff20, #fff8fc24);
 }
@@ -212,11 +221,35 @@ body {
   border-color: light-dark(#f0e9ee, #211a21);
 }
 
+.saved-library {
+  background: light-dark(#fffdfb, #211a21);
+  border-color: light-dark(#e8dfdd, #443843);
+}
+
+.saved-account-list button {
+  background: light-dark(#f5eff4, #302730);
+  border-color: light-dark(#d9ced7, #51434f);
+}
+
+.saved-account-list button.active {
+  border-color: var(--plum);
+}
+
 .library-state,
 .highlight-state,
 .profile-actions .export-button {
   background: light-dark(#fffdfb, #302730);
   border-color: light-dark(#d4c7d0, #51434f);
+}
+
+.library-state,
+.highlight-state {
+  color: light-dark(#675a69, #d5c5d0);
+}
+
+.highlight-tip {
+  color: light-dark(#675a69, #d5c5d0);
+  background: light-dark(#fffdfb, #302730);
 }
 
 .library-state.is-old,

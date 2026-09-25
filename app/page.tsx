@@ -53,6 +53,14 @@ type Story = {
   download_url: string;
   local_available: boolean;
   taken_at: string;
+  removed_from_instagram?: boolean;
+};
+
+type SavedAccount = {
+  id: string;
+  username: string;
+  full_name: string;
+  downloaded_stories: number;
 };
 
 type StoryResult = {
@@ -150,6 +158,8 @@ export default function Home() {
   const [target, setTarget] = useState("");
   const [viewer, setViewer] = useState("");
   const [scan, setScan] = useState<ScanResult | null>(null);
+  const [savedAccounts, setSavedAccounts] = useState<SavedAccount[]>([]);
+  const [libraryMode, setLibraryMode] = useState<"saved" | "instagram">("saved");
   const [activeHighlight, setActiveHighlight] = useState<Highlight | null>(null);
   const [stories, setStories] = useState<Story[]>([]);
   const [storiesLoading, setStoriesLoading] = useState(false);
@@ -201,6 +211,23 @@ export default function Home() {
   }, [refreshStatus]);
 
   useEffect(() => {
+    let active = true;
+    api<{ accounts: SavedAccount[] }>("/library")
+      .then(async (data) => {
+        if (!active) return;
+        setSavedAccounts(data.accounts);
+        if (data.accounts.length) {
+          const local = await api<ScanResult>(`/library/${data.accounts[0].id}`);
+          if (active) setScan((current) => current ?? local);
+        }
+      })
+      .catch(() => {
+        if (active) setMessage("Could not load the saved library.");
+      });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
     if (!viewer) return;
     const heartbeat = () => api("/session/heartbeat", { method: "POST" }).catch(() => setViewer(""));
     const timer = window.setInterval(heartbeat, 45_000);
@@ -225,6 +252,7 @@ export default function Home() {
         }),
       });
       setScan(data);
+      setLibraryMode("instagram");
       setHighlightPage(data.page);
       setStatus("idle");
     } catch (error) {
@@ -239,13 +267,15 @@ export default function Home() {
     setStoriesLoading(true);
     setMessage("");
     try {
-      const data = await api<StoryResult>("/highlights/stories", {
-        method: "POST",
-        body: JSON.stringify({
-          target_username: profileUsername || scan?.profile.username || target,
-          highlight_id: highlight.id,
-        }),
-      });
+      const data = libraryMode === "saved"
+        ? await api<StoryResult>(`/library/${scan?.profile.id}/highlights/${highlight.id}`)
+        : await api<StoryResult>("/highlights/stories", {
+            method: "POST",
+            body: JSON.stringify({
+              target_username: profileUsername || scan?.profile.username || target,
+              highlight_id: highlight.id,
+            }),
+          });
       const updatedHighlight = {
         ...data.highlight,
         cover_url: highlight.cover_url || data.highlight.cover_url,
@@ -323,13 +353,15 @@ export default function Home() {
     setActiveHighlight(null);
     setStories([]);
     try {
-      const data = await api<ScanResult>("/highlights/page", {
-        method: "POST",
-        body: JSON.stringify({
-          target_username: scan.profile.username,
-          page,
-        }),
-      });
+      const data = libraryMode === "saved"
+        ? await api<ScanResult>(`/library/${scan.profile.id}?page=${page}`)
+        : await api<ScanResult>("/highlights/page", {
+            method: "POST",
+            body: JSON.stringify({
+              target_username: scan.profile.username,
+              page,
+            }),
+          });
       setScan(data);
       setHighlightPage(data.page);
     } catch (error) {
@@ -354,7 +386,7 @@ export default function Home() {
     } finally {
       window.sessionStorage.removeItem(SESSION_KEY);
       setViewer("");
-      setScan(null);
+      if (libraryMode === "instagram") setScan(null);
       setDownloadTarget(null);
       setDownloadError(null);
       setMessage("Instagram session removed from memory.");
@@ -449,6 +481,20 @@ export default function Home() {
     link.remove();
   }
 
+  async function openSavedAccount(accountId: string) {
+    setMessage("");
+    try {
+      const local = await api<ScanResult>(`/library/${accountId}`);
+      setScan(local);
+      setLibraryMode("saved");
+      setHighlightPage(1);
+      setActiveHighlight(null);
+      setStories([]);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not open the saved profile.");
+    }
+  }
+
   return (
     <main>
       <nav className="nav" aria-label="Main navigation">
@@ -458,17 +504,29 @@ export default function Home() {
         </a>
         <div className="nav-actions">
           <ThemeSelector />
-          <span className="local-badge"><span /> {viewer ? `Connected @${viewer}` : "Login required"}</span>
+          <span className="local-badge"><span /> {viewer ? `Connected @${viewer}` : savedAccounts.length ? "Offline library ready" : "Login required"}</span>
         </div>
       </nav>
 
       <section className="hero local-hero">
         <div className="eyebrow"><span className="eyebrow-icon">✦</span>INSTAGRAM HIGHLIGHT ARCHIVER</div>
-        <h1>One profile.<br /><em>Every highlight.</em></h1>
-        <p className="intro">
-          See highlights exactly as they’re organized on Instagram, then save
-          every story into clean, named folders on your computer.
-        </p>
+        {savedAccounts.length ? (
+          <>
+            <h1>Your saved stories.<br /><em>Ready offline.</em></h1>
+            <p className="intro">Browse your downloaded highlights without logging in. Connect Instagram only when you want to find or update stories.</p>
+            <a className="offline-shortcut" href="#saved-library-title">
+              Browse {savedAccounts.length} saved {savedAccounts.length === 1 ? "profile" : "profiles"} <span aria-hidden="true">↓</span>
+            </a>
+          </>
+        ) : (
+          <>
+            <h1>One profile.<br /><em>Every highlight.</em></h1>
+            <p className="intro">
+              See highlights exactly as they’re organized on Instagram, then save
+              every story into clean, named folders on your computer.
+            </p>
+          </>
+        )}
 
         <form className="username-form" onSubmit={handleScan}>
           <div className="username-field">
@@ -521,34 +579,57 @@ export default function Home() {
         )}
       </section>
 
+      {savedAccounts.length > 0 && (
+        <section className="saved-library" aria-labelledby="saved-library-title">
+          <div>
+            <span className="section-number">ON THIS COMPUTER</span>
+            <h2 id="saved-library-title">Saved library</h2>
+            <p>Browse downloaded highlights and stories without connecting to Instagram.</p>
+          </div>
+          <div className="saved-account-list">
+            {savedAccounts.map((account) => (
+              <button
+                type="button"
+                key={account.id}
+                className={libraryMode === "saved" && scan?.profile.id === account.id ? "active" : ""}
+                onClick={() => openSavedAccount(account.id)}
+              >
+                <strong>@{account.username}</strong>
+                <span>{account.downloaded_stories.toLocaleString("en-US")} saved stories</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
       {scan && (
         <section className="library">
           <div className="profile-row">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={scan.profile.profile_pic_url}
-              alt=""
-              className="profile-photo"
-              referrerPolicy="no-referrer"
-            />
+            {scan.profile.profile_pic_url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={scan.profile.profile_pic_url} alt="" className="profile-photo" referrerPolicy="no-referrer" />
+            ) : (
+              <span className="profile-photo profile-photo-fallback"><FolderIcon /></span>
+            )}
             <div>
               <div className="profile-kicker-row">
                 <span className="result-owner">@{scan.profile.username}</span>
                 {scan.profile.has_local && (
                   <span className={`library-state ${scan.profile.is_old ? "is-old" : "is-current"}`}>
-                    {scan.profile.is_old ? `${scan.profile.old_highlights} old` : "Local copy ready"}
+                    {libraryMode === "saved" ? "Saved on this computer" : scan.profile.is_old ? `${scan.profile.old_highlights} old` : "Local copy ready"}
                   </span>
                 )}
               </div>
               <h2>{scan.profile.full_name || scan.profile.username}</h2>
               <p>
-                {scan.total_highlights} highlights · {scan.total_stories} on Instagram
-                {scan.profile.has_local && ` · ${scan.profile.downloaded_stories} saved locally`}
+                {libraryMode === "saved"
+                  ? `${scan.total_highlights} saved highlights · ${scan.total_stories} saved stories`
+                  : `${scan.total_highlights} highlights · ${scan.total_stories} on Instagram${scan.profile.has_local ? ` · ${scan.profile.downloaded_stories} saved locally` : ""}`}
               </p>
             </div>
             <div className="profile-download-control">
               <div className="profile-actions">
-                <button
+                {libraryMode === "instagram" && <button
                   type="button"
                   className="sync-button"
                   onClick={() => startDownload(null, canContinueDownload)}
@@ -571,7 +652,7 @@ export default function Home() {
                   ) : (
                     <>Download stories <span aria-hidden="true">↓</span></>
                   )}
-                </button>
+                </button>}
                 <button
                   type="button"
                   className="export-button"
@@ -610,13 +691,10 @@ export default function Home() {
                       aria-pressed={activeHighlight?.id === highlight.id}
                     >
                       <span className="highlight-ring">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={highlight.cover_url}
-                          alt=""
-                          loading="lazy"
-                          referrerPolicy="no-referrer"
-                        />
+                        {highlight.cover_url ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={highlight.cover_url} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                        ) : <span className="highlight-cover-fallback"><FolderIcon /></span>}
                         <i>{activeHighlight?.id === highlight.id ? "●" : ""}</i>
                       </span>
                       <strong>{highlight.title}</strong>
@@ -679,11 +757,11 @@ export default function Home() {
                 <div>
                   <span className="result-owner">SELECTED HIGHLIGHT</span>
                   <h3>{activeHighlight.title}</h3>
-                  <p>{activeHighlight.item_count} stories in Instagram order</p>
+                  <p>{activeHighlight.item_count} {libraryMode === "saved" ? "saved stories" : "stories in Instagram order"}</p>
                 </div>
                 <div className="story-browser-actions">
                   <span className="order-note">1 → {activeHighlight.item_count}</span>
-                  <button
+                  {libraryMode === "instagram" && <button
                     type="button"
                     onClick={() => startDownload(activeHighlight.id)}
                     disabled={downloadTarget !== null}
@@ -694,7 +772,7 @@ export default function Home() {
                     ) : (
                       <>{updateActionLabel(activeHighlight)} <span>↓</span></>
                     )}
-                  </button>
+                  </button>}
                   {activeHighlight.has_local && (
                     <button
                       type="button"
@@ -737,6 +815,7 @@ export default function Home() {
                         )}
                         <span className="story-number">{story.position}</span>
                         <span className="story-type">{story.type}</span>
+                        {story.removed_from_instagram && <span className="story-removed">Removed from Instagram</span>}
                       </div>
                       <div className="story-card-foot">
                         <span title={story.filename}>{story.filename}</span>

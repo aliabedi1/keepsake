@@ -772,7 +772,7 @@ export default function Home() {
               <p>
                 {libraryMode === "saved"
                   ? `${scan.total_entries} saved ${collectionLabel} · ${scan.total_files} saved ${itemLabel}`
-                  : `${scan.total_entries}${scan.has_more ? "+" : ""} ${collectionLabel}${scan.has_more ? " loaded" : ""} · ${scan.total_files} ${itemLabel}${scan.profile.has_local ? ` · ${scan.profile.saved_files} saved locally` : ""}`}
+                  : `${scan.total_entries} ${collectionLabel} · ${scan.total_files} ${scan.has_more ? "loaded " : ""}${itemLabel}${scan.profile.has_local ? ` · ${scan.profile.saved_files} saved locally` : ""}`}
               </p>
             </div>
             <div className="profile-download-control">
@@ -888,7 +888,7 @@ export default function Home() {
                 ))}
               </div>
               <span>
-                {firstVisibleEntry + 1}–{Math.min(firstVisibleEntry + scan.page_size, scan.total_entries)} of {scan.total_entries}{scan.has_more ? "+" : ""}
+                {firstVisibleEntry + 1}–{firstVisibleEntry + scan.entries.length} of {scan.total_entries}
               </span>
               <button
                 type="button"

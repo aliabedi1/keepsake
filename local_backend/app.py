@@ -519,6 +519,13 @@ def fetch_posts_page(session: BrowserSession, scan: dict[str, Any]) -> None:
         scan_collections(scan).extend(posts)
         scan["next_cursor"] = next_cursor
         scan["has_more"] = bool(next_cursor)
+        loaded_posts = len(scan_collections(scan))
+        # Profile metadata supplies the total before all cursor pages are fetched.
+        # Once the feed ends, the deduplicated result is authoritative.
+        scan["total_posts"] = (
+            max(int(scan.get("total_posts", 0)), loaded_posts)
+            if next_cursor else loaded_posts
+        )
         if next_cursor:
             scan.setdefault("seen_cursors", []).append(next_cursor)
 
@@ -530,9 +537,16 @@ def fetch_profile_scan(session: BrowserSession, target: str, mode: str) -> dict[
     scan = normalize_scan(profile, highlights)
     if mode == "posts":
         scan["posts"] = scan.pop("highlights")
+        scan["total_posts"] = max(int(model_value(profile, "media_count", 0) or 0), 0)
     scan["mode"] = mode
     if mode == "posts":
         fetch_posts_page(session, scan)
+        # Without a usable profile count, finish indexing rather than inventing
+        # a total from the loaded batch and revealing one extra page at a time.
+        if not model_value(profile, "media_count", 0):
+            while scan.get("has_more"):
+                time.sleep(2)
+                fetch_posts_page(session, scan)
     else:
         for highlight in scan_collections(scan):
             highlight["cover_url"] = proxy_media_url(session, highlight["cover_url"], f"highlight-{highlight['id']}-cover.jpg")
@@ -914,14 +928,16 @@ def all_user_highlights(client: Client, user_id: str) -> list[Any]:
 def public_scan_payload(
     scan: dict[str, Any], page: int = 1, session: BrowserSession | None = None,
 ) -> dict[str, Any]:
-    total_highlights = len(scan_collections(scan))
+    loaded_collections = len(scan_collections(scan))
+    total_collections = (
+        int(scan.get("total_posts", loaded_collections))
+        if scan.get("mode") == "posts" else loaded_collections
+    )
     total_pages = (
-        (total_highlights + HIGHLIGHTS_PER_PAGE - 1) // HIGHLIGHTS_PER_PAGE
-        if total_highlights
+        (total_collections + HIGHLIGHTS_PER_PAGE - 1) // HIGHLIGHTS_PER_PAGE
+        if total_collections
         else 0
     )
-    if scan.get("has_more"):
-        total_pages = (total_highlights + HIGHLIGHTS_PER_PAGE) // HIGHLIGHTS_PER_PAGE
     if (
         page < 1
         or (not total_pages and page != 1)
@@ -945,7 +961,7 @@ def public_scan_payload(
         "page": page,
         "page_size": HIGHLIGHTS_PER_PAGE,
         "total_pages": total_pages,
-        "total_posts" if scan.get("mode") == "posts" else "total_highlights": total_highlights,
+        "total_posts" if scan.get("mode") == "posts" else "total_highlights": total_collections,
         "total_files" if scan.get("mode") == "posts" else "total_stories": sum(
             highlight["item_count"] for highlight in scan_collections(scan)
         ),
@@ -1469,16 +1485,26 @@ def scan_profile_page(
     scan = session.scans.get(scan_key(target, request.mode))
     if not scan:
         raise HTTPException(status_code=409, detail="Scan this profile again first.")
+    page = request.page
     if request.mode == "posts":
+        total_posts = int(scan.get("total_posts", len(scan_collections(scan))))
+        total_pages = max(1, (total_posts + HIGHLIGHTS_PER_PAGE - 1) // HIGHLIGHTS_PER_PAGE)
+        if page < 1 or page > total_pages:
+            raise HTTPException(status_code=404, detail="That posts page does not exist.")
         try:
-            while scan.get("has_more") and len(scan_collections(scan)) < request.page * HIGHLIGHTS_PER_PAGE:
+            while scan.get("has_more") and len(scan_collections(scan)) < page * HIGHLIGHTS_PER_PAGE:
                 fetch_posts_page(session, scan)
+            if not scan.get("has_more"):
+                # If profile metadata overcounted the feed, show its actual last
+                # page instead of failing the previously valid navigation.
+                actual_pages = max(1, (len(scan_collections(scan)) + HIGHLIGHTS_PER_PAGE - 1) // HIGHLIGHTS_PER_PAGE)
+                page = min(page, actual_pages)
         except HTTPException:
             raise
         except Exception as exc:
             raise explain_instagram_error(exc, target) from exc
     attach_library_state(scan)
-    return public_scan_payload(scan, request.page, session=session)
+    return public_scan_payload(scan, page, session=session)
 
 
 @app.post("/api/highlights/stories")

@@ -123,8 +123,11 @@ backend does not reload automatically. If an older backend is still running,
 Keepsake shows a restart message and disables online downloads until the service
 is updated. Reconnect Instagram after restarting; saved files remain available.
 
-Post browsing fetches pages on demand and reuses pages already loaded in this
-session. A **+** beside the post count means more posts remain to be loaded.
+Post browsing calculates the full page count from Instagram's profile post count
+before displaying the first page. It fetches previews on demand and reuses pages
+already loaded in this session. The media-file count is labeled **loaded files**
+until the full feed has been fetched. When the feed ends, its actual post count
+replaces the profile count if Instagram's metadata was outdated.
 **Download posts** and **Update account** scan the complete profile feed in the
 background before saving files, including posts you have not browsed yet.
 **Continue download** retries missing or invalid files across the complete feed;

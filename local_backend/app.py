@@ -27,6 +27,7 @@ from instagrapi.exceptions import (
     LoginRequired,
     PleaseWaitFewMinutes,
     TwoFactorRequired,
+    UnknownError,
     UserNotFound,
 )
 from instagrapi.extractors import extract_highlight_v1
@@ -261,6 +262,25 @@ def explain_instagram_error(exc: Exception, target: str = "") -> HTTPException:
         return HTTPException(
             status_code=502,
             detail="Instagram could not complete the request. Check the connection and try once more.",
+        )
+    if isinstance(exc, UnknownError):
+        if getattr(exc, "error_type", "") == "needs_upgrade":
+            return HTTPException(
+                status_code=502,
+                detail=(
+                    "Instagram rejected the login client as outdated. Restart Keepsake "
+                    "using the start-local script to install the current dependencies. "
+                    "If this continues, open Instagram normally and complete any account notice."
+                ),
+            )
+        return HTTPException(
+            status_code=502,
+            detail=(
+                "Instagram rejected the request without a recognized error reason. "
+                "Open the official Instagram app or website, check that you can log in "
+                "and complete any account notice, then reconnect here. "
+                "If no notice appears, wait before trying again."
+            ),
         )
     return HTTPException(
         status_code=502,
@@ -1206,7 +1226,7 @@ def login(request: LoginRequest) -> dict[str, Any]:
     client = Client()
     client.delay_range = [1, 3]
     try:
-        client.login(username, password, verification_code=verification_code)
+        logged_in = client.login(username, password, verification_code=verification_code)
     except TwoFactorRequired as exc:
         raise HTTPException(
             status_code=409,
@@ -1219,6 +1239,16 @@ def login(request: LoginRequest) -> dict[str, Any]:
         ) from exc
     except Exception as exc:
         raise explain_instagram_error(exc) from exc
+
+    if not logged_in or not client.user_id:
+        client.password = ""
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Instagram did not establish an authenticated session. "
+                "Open Instagram normally and complete any account notice before reconnecting."
+            ),
+        )
 
     # The authenticated client keeps cookies/device settings in memory. The password
     # is deliberately discarded and is never written to disk.

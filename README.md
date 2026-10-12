@@ -142,6 +142,12 @@ remote highlight definitely changed.
 
 ### Session and credential handling
 
+Login uses instagrapi's current CAA flow and HTTP/2 mobile transport. If login
+fails with `UnknownError` or an outdated-client notice, stop Keepsake and restart
+it with `start-local.ps1` (Windows) or `start-local.sh` (Linux) to install the
+pinned dependencies. Complete any account verification in the official
+Instagram app or website before reconnecting; avoid repeated login attempts.
+
 Instagram credentials are handled only by the local backend. The password is
 discarded immediately after login. Authenticated client data, cached profile
 data and temporary Instagram media links remain in memory only and are removed

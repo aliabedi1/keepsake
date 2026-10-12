@@ -4,6 +4,13 @@ set -Eeuo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_EXE="$PROJECT_ROOT/.venv/bin/python"
+WINDOWS=false
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32*)
+    WINDOWS=true
+    PYTHON_EXE="$PROJECT_ROOT/.venv/Scripts/python.exe"
+    ;;
+esac
 REQUIREMENTS_FILE="$PROJECT_ROOT/requirements.txt"
 REQUIREMENTS_STAMP="$PROJECT_ROOT/.venv/.requirements.sha256"
 BACKEND_PID=""
@@ -14,15 +21,41 @@ cd "$PROJECT_ROOT"
 export NO_PROXY="${NO_PROXY:-},${no_proxy:-},localhost,127.0.0.1,::1"
 export no_proxy="$NO_PROXY"
 
-if [[ ! -x "$PYTHON_EXE" ]]; then
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "Python 3 is required but the python3 command was not found." >&2
+if [[ ! -x "$PYTHON_EXE" ]] || ! "$PYTHON_EXE" -c 'import sys; sys.exit(sys.version_info.major != 3)' >/dev/null 2>&1; then
+  PYTHON_COMMAND=()
+  # Windows Store aliases exist on PATH even when they cannot run Python.
+  for candidate in python3 python py; do
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    candidate_command=("$candidate")
+    if [[ "$candidate" == py ]]; then
+      candidate_command+=(-3)
+    fi
+    if "${candidate_command[@]}" -c 'import sys, venv; sys.exit(sys.version_info.major != 3)' >/dev/null 2>&1; then
+      PYTHON_COMMAND=("${candidate_command[@]}")
+      break
+    fi
+  done
+
+  if [[ ${#PYTHON_COMMAND[@]} -eq 0 ]]; then
+    if [[ "$WINDOWS" == true ]]; then
+      echo "A working Python 3 installation is required. Install Python for Windows with PATH enabled, then reopen Git Bash. Checked python3, python, and py -3." >&2
+    else
+      echo "Python 3 with the venv module is required. Install Python and your distribution's python3-venv package." >&2
+    fi
     exit 1
   fi
 
   echo "Preparing the local downloader for first use..."
-  if ! python3 -m venv .venv; then
-    echo "Could not create the virtual environment. Install your distribution's python3-venv package and try again." >&2
+  if ! "${PYTHON_COMMAND[@]}" -m venv .venv; then
+    if [[ "$WINDOWS" == true ]]; then
+      echo "Could not create the virtual environment. Repair your Python installation with venv and pip enabled, then try again." >&2
+    else
+      echo "Could not create the virtual environment. Install your distribution's python3-venv package and try again." >&2
+    fi
+    exit 1
+  fi
+  if [[ ! -x "$PYTHON_EXE" ]]; then
+    echo "The virtual environment did not create the expected interpreter: $PYTHON_EXE" >&2
     exit 1
   fi
 fi

@@ -108,6 +108,21 @@ the parent post's timestamp. Post captions are kept in the local manifest and
 shown in the preview. Highlights and posts have separate saved libraries and
 ZIP exports; switching modes keeps the same Instagram login.
 
+A highlight is a collection of stories. A post is a feed entry with one or more
+media files: a three-slide carousel counts as **1 post · 3 files**, while a
+highlight containing three stories counts as **1 highlight · 3 stories**.
+Each mode has its own definitions, API responses, manifests, and counts.
+See [the glossary](CONTEXT.md) for the terms used throughout Keepsake.
+
+When you are browsing a connected profile, switching modes loads that same
+profile's highlights or posts automatically. The app rejects content returned
+for the wrong mode, so a highlight cannot appear as a post.
+
+After an app update, restart the start script and refresh the browser. The Python
+backend does not reload automatically. If an older backend is still running,
+Keepsake shows a restart message and disables online downloads until the service
+is updated. Reconnect Instagram after restarting; saved files remain available.
+
 Post browsing fetches pages on demand and reuses pages already loaded in this
 session. A **+** beside the post count means more posts remain to be loaded.
 **Download posts** and **Update account** scan the complete profile feed in the

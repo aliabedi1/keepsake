@@ -47,7 +47,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DOWNLOAD_ROOT = PROJECT_ROOT / "downloads"
 
 
-app = FastAPI(title="Keepsake Local API", version="4.0")
+app = FastAPI(title="Keepsake Local API", version="5.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -78,6 +78,23 @@ class HighlightsPageRequest(ScanRequest):
 
 class LibrarySyncRequest(ScanRequest):
     highlight_id: str | None = None
+    undownloaded_only: bool = False
+
+
+class PostsScanRequest(BaseModel):
+    target_username: str
+
+
+class PostsPageRequest(PostsScanRequest):
+    page: int
+
+
+class PostMediaRequest(PostsScanRequest):
+    post_id: str
+
+
+class PostsSyncRequest(PostsScanRequest):
+    post_id: str | None = None
     undownloaded_only: bool = False
 
 
@@ -180,7 +197,7 @@ def parse_utc(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def story_taken_at(story: Any) -> tuple[str, str]:
+def media_taken_at(story: Any) -> tuple[str, str]:
     parsed = parse_utc(
         model_value(story, "taken_at")
         or model_value(story, "taken_at_timestamp")
@@ -289,7 +306,7 @@ def explain_instagram_error(exc: Exception, target: str = "") -> HTTPException:
     )
 
 
-def story_extension(story: Any, media_url: str) -> str:
+def media_extension(story: Any, media_url: str) -> str:
     if model_value(story, "media_type", 1) == 2 or model_value(story, "video_url"):
         return ".mp4"
     suffix = Path(urlparse(media_url).path).suffix.lower()
@@ -325,7 +342,7 @@ def largest_media_url(versions: Any) -> str:
     return string_url(largest["url"])
 
 
-def story_media_url(story: Any, is_video: bool) -> str:
+def media_source_url(story: Any, is_video: bool) -> str:
     direct_url = model_value(story, "video_url" if is_video else "thumbnail_url")
     if direct_url:
         return string_url(direct_url)
@@ -335,21 +352,19 @@ def story_media_url(story: Any, is_video: bool) -> str:
     return largest_media_url(model_value(image_versions, "candidates", []))
 
 
-def normalize_stories(highlight: Any) -> list[dict[str, Any]]:
+def normalize_media_files(items: list[Any]) -> list[dict[str, Any]]:
     stories: list[dict[str, Any]] = []
-    for story_index, story in enumerate(
-        model_value(highlight, "items", []) or [], start=1
-    ):
+    for story_index, story in enumerate(items, start=1):
         is_video = bool(
             model_value(story, "media_type", 1) == 2
             or model_value(story, "video_url")
         )
-        media_url = story_media_url(story, is_video)
+        media_url = media_source_url(story, is_video)
         if not media_url:
             continue
-        extension = story_extension(story, media_url)
+        extension = media_extension(story, media_url)
         story_id = str(model_value(story, "pk", story_index))
-        taken_at, timestamp_name = story_taken_at(story)
+        taken_at, timestamp_name = media_taken_at(story)
         stories.append(
             {
                 "id": story_id,
@@ -363,6 +378,10 @@ def normalize_stories(highlight: Any) -> list[dict[str, Any]]:
             }
         )
     return stories
+
+
+def normalize_stories(highlight: Any) -> list[dict[str, Any]]:
+    return normalize_media_files(model_value(highlight, "items", []) or [])
 
 
 def normalize_scan(profile: Any, highlights: list[Any]) -> dict[str, Any]:
@@ -393,12 +412,13 @@ def normalize_scan(profile: Any, highlights: list[Any]) -> dict[str, Any]:
                     or highlight_index
                 ).removeprefix("highlight:"),
                 "title": title,
+                "kind": "highlights",
                 "folder_name": folder,
                 "cover_url": cover_url(highlight),
                 "item_count": max(reported_count, len(stories)),
                 "position": highlight_index,
                 "stories": stories,
-                "stories_loaded": bool(stories) or reported_count == 0,
+                "media_loaded": bool(stories) or reported_count == 0,
             }
         )
 
@@ -421,9 +441,23 @@ def scan_key(target: str, mode: str) -> str:
     return f"posts:{target}" if mode == "posts" else target
 
 
+
+def scan_collections(scan: dict[str, Any]) -> list[dict[str, Any]]:
+    return scan["posts" if scan.get("mode") == "posts" else "highlights"]
+
+
+def collection_media(collection: dict[str, Any]) -> list[dict[str, Any]]:
+    return collection.get("files" if collection.get("kind") == "posts" else "stories") or []
+
+
+def manifest_media(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    # Read post manifests written before the separate post-file definition.
+    return manifest.get("files", manifest.get("stories", [])) or []
+
+
 def normalize_post(media: Any, position: int) -> dict[str, Any]:
     post_id = str(model_value(media, "pk"))
-    taken_at, timestamp = story_taken_at(media)
+    taken_at, timestamp = media_taken_at(media)
     resources = model_value(media, "resources", []) or [media]
     items = []
     for resource in resources:
@@ -434,7 +468,7 @@ def normalize_post(media: Any, position: int) -> dict[str, Any]:
             "thumbnail_url": model_value(resource, "thumbnail_url"),
             "taken_at": taken_at,
         })
-    stories = normalize_stories({"items": items})
+    files = normalize_media_files(items)
     return {
         "id": post_id,
         "kind": "posts",
@@ -442,11 +476,11 @@ def normalize_post(media: Any, position: int) -> dict[str, Any]:
         "caption": str(model_value(media, "caption_text", "") or ""),
         "taken_at": taken_at,
         "folder_name": f"Post {post_id}",
-        "cover_url": string_url(model_value(media, "thumbnail_url")),
+        "cover_url": string_url(model_value(media, "thumbnail_url") or model_value(resources[0], "thumbnail_url")),
         "item_count": len(resources),
         "position": position,
-        "stories": stories,
-        "stories_loaded": len(stories) == len(resources),
+        "files": files,
+        "media_loaded": len(files) == len(resources),
     }
 
 
@@ -468,12 +502,12 @@ def fetch_posts_page(session: BrowserSession, scan: dict[str, Any]) -> None:
         next_cursor = str(payload.get("next_max_id") or "")
         if next_cursor and next_cursor in scan.get("seen_cursors", []):
             raise HTTPException(status_code=502, detail="Instagram repeated a posts page. Try again later.")
-        existing = {item["id"] for item in scan["highlights"]}
+        existing = {item["id"] for item in scan_collections(scan)}
         posts = []
         for raw in payload["items"]:
-            post = normalize_post(extract_media_v1(raw), len(scan["highlights"]) + len(posts))
+            post = normalize_post(extract_media_v1(raw), len(scan_collections(scan)) + len(posts))
             post["item_count"] = max(post["item_count"], int(raw.get("carousel_media_count", 0) or 0))
-            post["stories_loaded"] = len(post["stories"]) == post["item_count"]
+            post["media_loaded"] = len(post["files"]) == post["item_count"]
             if post["id"] in existing:
                 continue
             existing.add(post["id"])
@@ -482,7 +516,7 @@ def fetch_posts_page(session: BrowserSession, scan: dict[str, Any]) -> None:
             post["cover_source_url"] = post["cover_url"]
             post["cover_url"] = ""
             posts.append(post)
-        scan["highlights"].extend(posts)
+        scan_collections(scan).extend(posts)
         scan["next_cursor"] = next_cursor
         scan["has_more"] = bool(next_cursor)
         if next_cursor:
@@ -494,11 +528,13 @@ def fetch_profile_scan(session: BrowserSession, target: str, mode: str) -> dict[
         profile = session.client.user_info_by_username_v1(target)
         highlights = all_user_highlights(session.client, str(profile.pk)) if mode == "highlights" else []
     scan = normalize_scan(profile, highlights)
+    if mode == "posts":
+        scan["posts"] = scan.pop("highlights")
     scan["mode"] = mode
     if mode == "posts":
         fetch_posts_page(session, scan)
     else:
-        for highlight in scan["highlights"]:
+        for highlight in scan_collections(scan):
             highlight["cover_url"] = proxy_media_url(session, highlight["cover_url"], f"highlight-{highlight['id']}-cover.jpg")
     scan["profile"]["profile_pic_url"] = proxy_media_url(
         session, scan["profile"]["profile_pic_url"], f"{target}-profile.jpg",
@@ -556,7 +592,7 @@ def account_directory(profile: dict[str, Any], *, create: bool = False) -> Path:
     return directory
 
 
-def highlight_folder_name(highlight: dict[str, Any]) -> str:
+def collection_folder_name(highlight: dict[str, Any]) -> str:
     title = safe_name(
         str(highlight.get("title", "")),
         f"Highlight {int(highlight.get('position', 0)) + 1}",
@@ -568,7 +604,7 @@ def highlight_folder_name(highlight: dict[str, Any]) -> str:
     )
 
 
-def find_highlight_directory(account_dir: Path, highlight_id: str, mode: str = "highlights") -> Path | None:
+def find_collection_directory(account_dir: Path, highlight_id: str, mode: str = "highlights") -> Path | None:
     parent = account_dir / mode
     if not parent.exists():
         return None
@@ -581,13 +617,13 @@ def find_highlight_directory(account_dir: Path, highlight_id: str, mode: str = "
     return None
 
 
-def highlight_directory(
+def collection_directory(
     account_dir: Path, highlight: dict[str, Any], *, create: bool = False
 ) -> Path:
     mode = highlight.get("kind", "highlights")
     parent = account_dir / mode
-    existing = find_highlight_directory(account_dir, str(highlight["id"]), mode)
-    desired = parent / highlight_folder_name(highlight)
+    existing = find_collection_directory(account_dir, str(highlight["id"]), mode)
+    desired = parent / collection_folder_name(highlight)
     if existing and create and existing != desired and not desired.exists():
         existing.rename(desired)
         existing = desired
@@ -644,12 +680,12 @@ def candidate_file_is_valid(path: Path, record: dict[str, Any] | None) -> bool:
     return not expected_checksum or sha256_file(path) == expected_checksum
 
 
-def highlight_library_state(
+def collection_library_state(
     account_dir: Path, highlight: dict[str, Any]
 ) -> dict[str, Any]:
-    directory = find_highlight_directory(account_dir, str(highlight["id"]), highlight.get("kind", "highlights"))
+    directory = find_collection_directory(account_dir, str(highlight["id"]), highlight.get("kind", "highlights"))
     manifest = read_json(directory / "manifest.json") if directory else {}
-    records = manifest.get("stories") or []
+    records = manifest_media(manifest)
     current_records = [
         record for record in records
         if isinstance(record, dict) and not record.get("removed_from_instagram")
@@ -693,8 +729,8 @@ def attach_library_state(scan: dict[str, Any]) -> None:
     undownloaded_total = 0
     old_highlights = 0
     latest_update = ""
-    for highlight in scan["highlights"]:
-        state = highlight_library_state(account_dir, highlight)
+    for highlight in scan_collections(scan):
+        state = collection_library_state(account_dir, highlight)
         highlight.update(state)
         saved_total += state["downloaded_count"] + state["removed_count"]
         undownloaded_total += max(
@@ -703,7 +739,7 @@ def attach_library_state(scan: dict[str, Any]) -> None:
         )
         old_highlights += int(state["is_old"])
         latest_update = max(latest_update, str(state["last_updated_at"]))
-    remote_ids = {str(highlight["id"]) for highlight in scan["highlights"]}
+    remote_ids = {str(highlight["id"]) for highlight in scan_collections(scan)}
     highlights_root = account_dir / scan.get("mode", "highlights")
     for directory in highlights_root.iterdir() if highlights_root.exists() else []:
         if not directory.is_dir():
@@ -713,16 +749,16 @@ def attach_library_state(scan: dict[str, Any]) -> None:
             continue
         saved_total += sum(
             record_file_is_valid(directory, record)
-            for record in manifest.get("stories") or []
+            for record in manifest_media(manifest)
             if isinstance(record, dict)
         )
     scan["profile"].update(
         {
-            "downloaded_stories": saved_total,
-            "undownloaded_stories": undownloaded_total,
+            "downloaded_files" if scan.get("mode") == "posts" else "downloaded_stories": saved_total,
+            "undownloaded_files" if scan.get("mode") == "posts" else "undownloaded_stories": undownloaded_total,
             "has_local": saved_total > 0,
             "is_old": old_highlights > 0,
-            "old_highlights": old_highlights,
+            "old_posts" if scan.get("mode") == "posts" else "old_highlights": old_highlights,
             "last_updated_at": latest_update,
         }
     )
@@ -878,7 +914,7 @@ def all_user_highlights(client: Client, user_id: str) -> list[Any]:
 def public_scan_payload(
     scan: dict[str, Any], page: int = 1, session: BrowserSession | None = None,
 ) -> dict[str, Any]:
-    total_highlights = len(scan["highlights"])
+    total_highlights = len(scan_collections(scan))
     total_pages = (
         (total_highlights + HIGHLIGHTS_PER_PAGE - 1) // HIGHLIGHTS_PER_PAGE
         if total_highlights
@@ -894,7 +930,7 @@ def public_scan_payload(
         raise HTTPException(status_code=404, detail=f"That {scan.get('mode', 'highlights')} page does not exist.")
 
     first_highlight = (page - 1) * HIGHLIGHTS_PER_PAGE
-    page_highlights = scan["highlights"][
+    page_highlights = scan_collections(scan)[
         first_highlight : first_highlight + HIGHLIGHTS_PER_PAGE
     ]
     if session and scan.get("mode") == "posts":
@@ -909,15 +945,15 @@ def public_scan_payload(
         "page": page,
         "page_size": HIGHLIGHTS_PER_PAGE,
         "total_pages": total_pages,
-        "total_highlights": total_highlights,
-        "total_stories": sum(
-            highlight["item_count"] for highlight in scan["highlights"]
+        "total_posts" if scan.get("mode") == "posts" else "total_highlights": total_highlights,
+        "total_files" if scan.get("mode") == "posts" else "total_stories": sum(
+            highlight["item_count"] for highlight in scan_collections(scan)
         ),
-        "highlights": [
+        "posts" if scan.get("mode") == "posts" else "highlights": [
             {
                 key: value
                 for key, value in highlight.items()
-                if key not in {"stories", "folder_name", "stories_loaded", "cover_source_url"}
+                if key not in {"stories", "files", "folder_name", "media_loaded", "cover_source_url"}
             }
             for highlight in page_highlights
         ],
@@ -955,8 +991,8 @@ def raw_highlight_detail(client: Client, highlight_id: str) -> dict[str, Any]:
     return detail
 
 
-def hydrate_highlight(session: BrowserSession, highlight: dict[str, Any]) -> None:
-    if highlight["stories_loaded"]:
+def hydrate_collection(session: BrowserSession, highlight: dict[str, Any]) -> None:
+    if highlight["media_loaded"]:
         return
 
     try:
@@ -971,18 +1007,18 @@ def hydrate_highlight(session: BrowserSession, highlight: dict[str, Any]) -> Non
             expected_count = int(items[0].get("carousel_media_count", refreshed["item_count"]) or refreshed["item_count"])
             if refreshed["item_count"] < expected_count:
                 raise HTTPException(status_code=502, detail="Instagram returned an incomplete carousel. Try again later.")
-            highlight.update({key: refreshed[key] for key in ("stories", "item_count", "stories_loaded", "caption", "taken_at")})
-            if not highlight["stories_loaded"]:
+            highlight.update({key: refreshed[key] for key in ("files", "item_count", "media_loaded", "caption", "taken_at")})
+            if not highlight["media_loaded"]:
                 raise HTTPException(status_code=502, detail="Instagram did not return all media for this post. Try again later.")
             return
         with session.request_lock:
-            if highlight["stories_loaded"]:
+            if highlight["media_loaded"]:
                 return
             detail = raw_highlight_detail(session.client, highlight["id"])
             stories = normalize_stories(detail)
             highlight["stories"] = stories
             highlight["item_count"] = len(stories)
-            highlight["stories_loaded"] = True
+            highlight["media_loaded"] = True
             detailed_cover = cover_url(detail)
             if detailed_cover and not highlight["cover_url"]:
                 highlight["cover_url"] = proxy_media_url(
@@ -1051,7 +1087,7 @@ def quarantine_file(highlight_dir: Path, path: Path) -> None:
     path.replace(destination)
 
 
-def find_story_candidate(
+def find_media_candidate(
     highlight_dir: Path, story_id: str, old_record: dict[str, Any] | None
 ) -> Path | None:
     if old_record:
@@ -1146,7 +1182,7 @@ def download_media_file(
     )
 
 
-def save_highlight_manifest(
+def save_collection_manifest(
     path: Path,
     highlight: dict[str, Any],
     stories: list[dict[str, Any]],
@@ -1163,34 +1199,34 @@ def save_highlight_manifest(
             "caption": highlight.get("caption", ""),
             "taken_at": highlight.get("taken_at", ""),
             "last_checked_at": checked_at,
-            "remote_story_count": len(highlight["stories"]),
-            "stories": stories,
+            "remote_file_count" if highlight.get("kind") == "posts" else "remote_story_count": len(collection_media(highlight)),
+            "files" if highlight.get("kind") == "posts" else "stories": stories,
         },
     )
 
 
-def reconcile_highlight(
+def reconcile_collection(
     session: BrowserSession,
     account_dir: Path,
     highlight: dict[str, Any],
     job: dict[str, Any],
 ) -> None:
-    directory = highlight_directory(account_dir, highlight, create=True)
+    directory = collection_directory(account_dir, highlight, create=True)
     manifest_path = directory / "manifest.json"
     previous = read_json(manifest_path)
     old_records = {
         str(record.get("id", "")): record
-        for record in previous.get("stories") or []
+        for record in manifest_media(previous)
         if isinstance(record, dict) and record.get("id")
     }
-    remote_ids = {str(story["id"]) for story in highlight["stories"]}
+    remote_ids = {str(story["id"]) for story in collection_media(highlight)}
     checked_at = utc_now()
     reconciled: list[dict[str, Any]] = []
 
     for old_id, old_record in old_records.items():
         if old_id in remote_ids:
             continue
-        candidate = find_story_candidate(directory, old_id, old_record)
+        candidate = find_media_candidate(directory, old_id, old_record)
         if candidate and candidate_file_is_valid(candidate, old_record):
             destination = directory / "removed" / candidate.name
             if candidate != destination:
@@ -1210,11 +1246,11 @@ def reconcile_highlight(
             )
             reconciled.append(removed_record)
 
-    for story in highlight["stories"]:
+    for story in collection_media(highlight):
         story_id = str(story["id"])
         old_record = old_records.get(story_id)
         destination = directory / "current" / story["filename"]
-        candidate = find_story_candidate(directory, story_id, old_record)
+        candidate = find_media_candidate(directory, story_id, old_record)
         record = {
             "id": story_id,
             "position": story["position"],
@@ -1228,8 +1264,8 @@ def reconcile_highlight(
             "sha256": (old_record or {}).get("sha256", ""),
             "error": "",
         }
-        job["current_story"] = story["position"]
-        job["current_story_total"] = len(highlight["stories"])
+        job["current_file"] = story["position"]
+        job["current_file_total"] = len(collection_media(highlight))
 
         if candidate and candidate_file_is_valid(candidate, old_record):
             if candidate != destination:
@@ -1266,13 +1302,13 @@ def reconcile_highlight(
                 record["error"] = str(exc)
                 job["failed_items"] += 1
                 job["errors"].append(
-                    f"{highlight['title']} story {story['position']}: {exc}"
+                    f"{highlight['title']} {'file' if highlight.get('kind') == 'posts' else 'story'} {story['position']}: {exc}"
                 )
         reconciled.append(record)
         job["processed_items"] += 1
-        save_highlight_manifest(manifest_path, highlight, reconciled, checked_at)
+        save_collection_manifest(manifest_path, highlight, reconciled, checked_at)
 
-    save_highlight_manifest(manifest_path, highlight, reconciled, checked_at)
+    save_collection_manifest(manifest_path, highlight, reconciled, checked_at)
 
 
 def save_account_manifest(
@@ -1288,10 +1324,10 @@ def save_account_manifest(
     }
     current_ids: set[str] = set()
     highlights: list[dict[str, Any]] = []
-    for highlight in scan["highlights"]:
+    for highlight in scan_collections(scan):
         highlight_id = str(highlight["id"])
         current_ids.add(highlight_id)
-        directory = find_highlight_directory(account_dir, highlight_id, mode)
+        directory = find_collection_directory(account_dir, highlight_id, mode)
         highlights.append(
             {
                 "id": highlight_id,
@@ -1326,12 +1362,12 @@ def status(
 ) -> dict[str, Any]:
     expire_inactive_sessions()
     if not session_token:
-        return {"ready": True, "connected": False, "username": None}
+        return {"api_version": 5, "supported_modes": ["highlights", "posts"], "ready": True, "connected": False, "username": None}
     try:
         session = get_session(session_token)
     except HTTPException:
-        return {"ready": True, "connected": False, "username": None}
-    return {"ready": True, "connected": True, "username": session.username}
+        return {"api_version": 5, "supported_modes": ["highlights", "posts"], "ready": True, "connected": False, "username": None}
+    return {"api_version": 5, "supported_modes": ["highlights", "posts"], "ready": True, "connected": True, "username": session.username}
 
 
 @app.post("/api/session/login")
@@ -1407,7 +1443,7 @@ def logout(
 
 
 @app.post("/api/highlights/scan")
-def scan_highlights(
+def scan_profile(
     request: ScanRequest,
     session_token: str | None = Header(default=None, alias="X-Keepsake-Session"),
 ) -> dict[str, Any]:
@@ -1424,7 +1460,7 @@ def scan_highlights(
 
 
 @app.post("/api/highlights/page")
-def scan_highlights_page(
+def scan_profile_page(
     request: HighlightsPageRequest,
     session_token: str | None = Header(default=None, alias="X-Keepsake-Session"),
 ) -> dict[str, Any]:
@@ -1435,7 +1471,7 @@ def scan_highlights_page(
         raise HTTPException(status_code=409, detail="Scan this profile again first.")
     if request.mode == "posts":
         try:
-            while scan.get("has_more") and len(scan["highlights"]) < request.page * HIGHLIGHTS_PER_PAGE:
+            while scan.get("has_more") and len(scan_collections(scan)) < request.page * HIGHLIGHTS_PER_PAGE:
                 fetch_posts_page(session, scan)
         except HTTPException:
             raise
@@ -1446,7 +1482,7 @@ def scan_highlights_page(
 
 
 @app.post("/api/highlights/stories")
-def scan_highlight_stories(
+def collection_detail(
     request: StoriesRequest,
     session_token: str | None = Header(default=None, alias="X-Keepsake-Session"),
 ) -> dict[str, Any]:
@@ -1457,27 +1493,27 @@ def scan_highlight_stories(
         raise HTTPException(status_code=409, detail="Scan this profile again first.")
 
     highlight = next(
-        (item for item in scan["highlights"] if item["id"] == request.highlight_id),
+        (item for item in scan_collections(scan) if item["id"] == request.highlight_id),
         None,
     )
     if not highlight:
         raise HTTPException(status_code=404, detail="That highlight was not found.")
 
-    hydrate_highlight(session, highlight)
-    highlight.update(highlight_library_state(account_directory(scan["profile"]), highlight))
+    hydrate_collection(session, highlight)
+    highlight.update(collection_library_state(account_directory(scan["profile"]), highlight))
     account_dir = account_directory(scan["profile"])
-    local_highlight_dir = find_highlight_directory(account_dir, highlight["id"], request.mode)
+    local_highlight_dir = find_collection_directory(account_dir, highlight["id"], request.mode)
     local_manifest = (
         read_json(local_highlight_dir / "manifest.json")
         if local_highlight_dir else {}
     )
     local_records = {
         str(record.get("id", "")): record
-        for record in local_manifest.get("stories") or []
+        for record in manifest_media(local_manifest)
         if isinstance(record, dict) and not record.get("removed_from_instagram")
     }
     stories = []
-    for story in highlight["stories"]:
+    for story in collection_media(highlight):
         local_record = local_records.get(str(story["id"]))
         local_available = bool(
             local_highlight_dir
@@ -1505,17 +1541,17 @@ def scan_highlight_stories(
 
     return {
         "profile_username": scan["profile"]["username"],
-        "highlight": {
+        "post" if request.mode == "posts" else "highlight": {
             key: value
             for key, value in highlight.items()
-            if key not in {"stories", "folder_name", "stories_loaded", "cover_source_url"}
+            if key not in {"stories", "files", "folder_name", "media_loaded", "cover_source_url"}
         },
-        "stories": stories,
+        "files" if request.mode == "posts" else "stories": stories,
     }
 
 
 @app.post("/api/library/sync", status_code=202)
-def prepare_library_sync(
+def prepare_collection_sync(
     request: LibrarySyncRequest,
     session_token: str | None = Header(default=None, alias="X-Keepsake-Session"),
 ) -> dict[str, str]:
@@ -1531,7 +1567,7 @@ def prepare_library_sync(
         )
 
     highlights = [
-        item for item in scan["highlights"]
+        item for item in scan_collections(scan)
         if not request.highlight_id or item["id"] == request.highlight_id
     ]
     if request.undownloaded_only and not request.highlight_id:
@@ -1547,14 +1583,15 @@ def prepare_library_sync(
     job = {
         "id": job_id,
         "target": target,
-        "highlight_id": request.highlight_id or "",
+        "collection_id": request.highlight_id or "",
+        "mode": request.mode,
         "created_at": time.time(),
         "status": "working",
-        "completed_highlights": 0,
-        "total_highlights": len(highlights),
-        "current_highlight": "",
-        "current_story": 0,
-        "current_story_total": 0,
+        "completed_collections": 0,
+        "total_collections": len(highlights),
+        "current_collection": "",
+        "current_file": 0,
+        "current_file_total": 0,
         "processed_items": 0,
         "total_items": sum(int(item.get("item_count", 0)) for item in highlights),
         "downloaded_items": 0,
@@ -1573,33 +1610,33 @@ def prepare_library_sync(
                 working_scan = fetch_profile_scan(session, target, request.mode)
                 if request.mode == "posts":
                     while working_scan.get("has_more"):
-                        job["current_highlight"] = f"Finding posts: {len(working_scan['highlights'])} found"
+                        job["current_collection"] = f"Finding posts: {len(scan_collections(working_scan))} found"
                         time.sleep(2)
                         fetch_posts_page(session, working_scan)
                 attach_library_state(working_scan)
                 working_highlights = [
-                    item for item in working_scan["highlights"]
+                    item for item in scan_collections(working_scan)
                     if not request.undownloaded_only
                     or int(item.get("downloaded_count", 0) or 0)
                     < int(item.get("item_count", 0) or 0)
                 ]
                 session.scans[scan_key(target, request.mode)] = working_scan
-                job["total_highlights"] = len(working_highlights)
+                job["total_collections"] = len(working_highlights)
                 job["total_items"] = sum(
                     int(item.get("item_count", 0)) for item in working_highlights
                 )
 
             account_dir = account_directory(working_scan["profile"], create=True)
             for index, highlight in enumerate(working_highlights, start=1):
-                job["current_highlight"] = highlight["title"]
-                job["current_story"] = 0
-                job["current_story_total"] = 0
+                job["current_collection"] = highlight["title"]
+                job["current_file"] = 0
+                job["current_file_total"] = 0
                 if (request.undownloaded_only or request.mode == "posts") and index > 1:
                     time.sleep(CONTINUE_HIGHLIGHT_DELAY_SECONDS)
                 try:
                     if request.mode == "posts":
-                        highlight["stories_loaded"] = False
-                        hydrate_highlight(session, highlight)
+                        highlight["media_loaded"] = False
+                        hydrate_collection(session, highlight)
                     else:
                         with session.request_lock:
                             detail = raw_highlight_detail(session.client, highlight["id"])
@@ -1607,8 +1644,8 @@ def prepare_library_sync(
                             model_value(detail, "title", "") or highlight["title"]
                         )
                         highlight["stories"] = normalize_stories(detail)
-                        highlight["item_count"] = len(highlight["stories"])
-                        highlight["stories_loaded"] = True
+                        highlight["item_count"] = len(collection_media(highlight))
+                        highlight["media_loaded"] = True
                         detailed_cover = cover_url(detail)
                         if detailed_cover and not highlight.get("cover_url"):
                             highlight["cover_url"] = proxy_media_url(
@@ -1617,12 +1654,12 @@ def prepare_library_sync(
                                 f"highlight-{highlight['id']}-cover.jpg",
                             )
                     job["total_items"] = sum(
-                        len(item.get("stories") or [])
-                        if item.get("stories_loaded")
+                        len(collection_media(item))
+                        if item.get("media_loaded")
                         else int(item.get("item_count", 0))
                         for item in working_highlights
                     )
-                    reconcile_highlight(session, account_dir, highlight, job)
+                    reconcile_collection(session, account_dir, highlight, job)
                 except Exception as exc:
                     if isinstance(exc, HTTPException) and exc.status_code in {401, 403, 429}:
                         raise
@@ -1642,7 +1679,7 @@ def prepare_library_sync(
                     )
                     job["failed_items"] += max(int(highlight.get("item_count", 0)), 1)
                     job["errors"].append(f"{highlight['title']}: {detail_message}")
-                job["completed_highlights"] = index
+                job["completed_collections"] = index
                 save_account_manifest(
                     account_dir,
                     working_scan,
@@ -1655,9 +1692,9 @@ def prepare_library_sync(
             if not working_highlights:
                 save_account_manifest(account_dir, working_scan, full_sync=True)
             attach_library_state(working_scan)
-            job["current_highlight"] = ""
-            job["current_story"] = 0
-            job["current_story_total"] = 0
+            job["current_collection"] = ""
+            job["current_file"] = 0
+            job["current_file_total"] = 0
             job["completed_at"] = time.time()
             if job["errors"]:
                 job["status"] = "partial"
@@ -1690,6 +1727,41 @@ def prepare_library_sync(
     return {"job_id": job_id}
 
 
+@app.post("/api/posts/scan")
+def scan_posts(
+    request: PostsScanRequest,
+    session_token: str | None = Header(default=None, alias="X-Keepsake-Session"),
+) -> dict[str, Any]:
+    return scan_profile(ScanRequest(target_username=request.target_username, mode="posts"), session_token)
+
+
+@app.post("/api/posts/page")
+def posts_page(
+    request: PostsPageRequest,
+    session_token: str | None = Header(default=None, alias="X-Keepsake-Session"),
+) -> dict[str, Any]:
+    return scan_profile_page(HighlightsPageRequest(target_username=request.target_username, mode="posts", page=request.page), session_token)
+
+
+@app.post("/api/posts/media")
+def post_media(
+    request: PostMediaRequest,
+    session_token: str | None = Header(default=None, alias="X-Keepsake-Session"),
+) -> dict[str, Any]:
+    return collection_detail(StoriesRequest(target_username=request.target_username, mode="posts", highlight_id=request.post_id), session_token)
+
+
+@app.post("/api/posts/sync", status_code=202)
+def sync_posts(
+    request: PostsSyncRequest,
+    session_token: str | None = Header(default=None, alias="X-Keepsake-Session"),
+) -> dict[str, str]:
+    return prepare_collection_sync(LibrarySyncRequest(
+        target_username=request.target_username, mode="posts", highlight_id=request.post_id,
+        undownloaded_only=request.undownloaded_only,
+    ), session_token)
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(
     job_id: str,
@@ -1702,13 +1774,13 @@ def get_job(
     return dict(job)
 
 
-def saved_highlight_summary(directory: Path, user_id: str, mode: str = "highlights") -> dict[str, Any] | None:
+def saved_collection_summary(directory: Path, user_id: str, mode: str = "highlights") -> dict[str, Any] | None:
     manifest = read_json(directory / "manifest.json")
     highlight_id = str(manifest.get("id", ""))
     if not highlight_id:
         return None
     records = [
-        record for record in manifest.get("stories") or []
+        record for record in manifest_media(manifest)
         if isinstance(record, dict) and record.get("local_path") and record.get("size")
     ]
     if not records:
@@ -1755,22 +1827,25 @@ def list_saved_accounts(mode: Literal["highlights", "posts"] = Query(default="hi
             continue
         highlights_root = directory / mode
         saved_count = 0
+        saved_collections = 0
         for highlight_dir in highlights_root.iterdir() if highlights_root.exists() else []:
             if not highlight_dir.is_dir():
                 continue
-            highlight = saved_highlight_summary(highlight_dir, str(profile["id"]), mode)
+            highlight = saved_collection_summary(highlight_dir, str(profile["id"]), mode)
             if highlight:
                 saved_count += highlight["downloaded_count"]
+                saved_collections += 1
         if not saved_count:
             continue
         accounts.append({
             "id": str(profile["id"]),
             "username": str(profile.get("username", "")),
             "full_name": str(profile.get("full_name", "")),
-            "downloaded_stories": saved_count,
+            "downloaded_files" if mode == "posts" else "downloaded_stories": saved_count,
+            "saved_posts" if mode == "posts" else "saved_highlights": saved_collections,
         })
     accounts.sort(key=lambda account: account["username"].casefold())
-    return {"accounts": accounts}
+    return {"mode": mode, "accounts": accounts}
 
 
 @app.get("/api/library/{user_id}")
@@ -1789,7 +1864,7 @@ def get_saved_account(
     for directory in highlights_root.iterdir() if highlights_root.exists() else []:
         if not directory.is_dir():
             continue
-        highlight = saved_highlight_summary(directory, user_id, mode)
+        highlight = saved_collection_summary(directory, user_id, mode)
         if highlight:
             highlights.append(highlight)
     highlights.sort(key=lambda highlight: (highlight["position"], highlight["id"]))
@@ -1807,19 +1882,19 @@ def get_saved_account(
             "full_name": str(profile.get("full_name", "")),
             "profile_pic_url": "",
             "is_private": bool(profile.get("is_private", False)),
-            "downloaded_stories": saved_count,
-            "undownloaded_stories": 0,
+            "downloaded_files" if mode == "posts" else "downloaded_stories": saved_count,
+            "undownloaded_files" if mode == "posts" else "undownloaded_stories": 0,
             "has_local": saved_count > 0,
             "is_old": False,
-            "old_highlights": 0,
+            "old_posts" if mode == "posts" else "old_highlights": 0,
             "last_updated_at": str(profile.get("last_updated_at", "")),
         },
-        "highlights": highlights[(page - 1) * page_size:page * page_size],
+        mode: highlights[(page - 1) * page_size:page * page_size],
         "page": page,
         "page_size": page_size,
         "total_pages": total_pages,
-        "total_highlights": len(highlights),
-        "total_stories": saved_count,
+        "total_posts" if mode == "posts" else "total_highlights": len(highlights),
+        "total_files" if mode == "posts" else "total_stories": saved_count,
     }
 
 
@@ -1831,15 +1906,15 @@ def get_saved_highlight(
     account_dir = find_account_directory(user_id)
     if not account_dir:
         raise HTTPException(status_code=404, detail="That local account was not found.")
-    directory = find_highlight_directory(account_dir, highlight_id, mode)
+    directory = find_collection_directory(account_dir, highlight_id, mode)
     if not directory:
         raise HTTPException(status_code=404, detail="That local highlight was not found.")
-    highlight = saved_highlight_summary(directory, user_id, mode)
+    highlight = saved_collection_summary(directory, user_id, mode)
     if not highlight:
         raise HTTPException(status_code=404, detail="That highlight has no valid local files.")
     manifest = read_json(directory / "manifest.json")
     stories = []
-    for record in manifest.get("stories") or []:
+    for record in manifest_media(manifest):
         if not isinstance(record, dict) or not record_file_is_valid(directory, record):
             continue
         media_url = (
@@ -1864,7 +1939,12 @@ def get_saved_highlight(
     highlight["item_count"] = len(stories)
     highlight["downloaded_count"] = len(stories)
     highlight["removed_count"] = sum(story["removed_from_instagram"] for story in stories)
-    return {"highlight": highlight, "stories": stories}
+    return {"post" if mode == "posts" else "highlight": highlight, "files" if mode == "posts" else "stories": stories}
+
+
+@app.get("/api/library/{user_id}/posts/{post_id}")
+def get_saved_post(user_id: str, post_id: str) -> dict[str, Any]:
+    return get_saved_highlight(user_id, post_id, mode="posts")
 
 
 @app.get("/api/library/{user_id}/export")
@@ -1896,7 +1976,7 @@ def export_library(
             f"{safe_name(str(manifest.get('title', '')), 'Highlight', 60)}__"
             f"ig_{'post' if mode == 'posts' else 'highlight'}_{safe_name(str(manifest.get('id', '')), 'unknown', 50)}"
         )
-        for record in manifest.get("stories") or []:
+        for record in manifest_media(manifest):
             if not isinstance(record, dict) or not record_file_is_valid(directory, record):
                 continue
             path = local_record_path(directory, record)
@@ -1939,13 +2019,13 @@ def local_story_media(
     account_dir = find_account_directory(user_id)
     if not account_dir:
         raise HTTPException(status_code=404, detail="That local account was not found.")
-    directory = find_highlight_directory(account_dir, highlight_id, mode)
+    directory = find_collection_directory(account_dir, highlight_id, mode)
     if not directory:
         raise HTTPException(status_code=404, detail="That local highlight was not found.")
     manifest = read_json(directory / "manifest.json")
     record = next(
         (
-            item for item in manifest.get("stories") or []
+            item for item in manifest_media(manifest)
             if isinstance(item, dict) and str(item.get("id", "")) == story_id
         ),
         None,

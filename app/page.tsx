@@ -5,9 +5,10 @@ import ThemeSelector from "./theme-selector";
 
 const API = "http://127.0.0.1:8787/api";
 const SESSION_KEY = "keepsake-browser-session";
+const BACKEND_UPDATE_MESSAGE = "The local service is an older version. Restart Keepsake with start-local.ps1 (Windows) or start-local.sh (Linux), then reconnect Instagram.";
 type ContentMode = "highlights" | "posts";
 
-type Highlight = {
+type CollectionSummary = {
   id: string;
   title: string;
   cover_url: string;
@@ -20,35 +21,56 @@ type Highlight = {
   last_updated_at: string;
   is_old: boolean;
   has_local: boolean;
-  caption?: string;
-  taken_at?: string;
 };
 
-type ScanResult = {
-  mode: ContentMode;
-  has_more: boolean;
-  profile: {
-    id: string;
-    username: string;
-    full_name: string;
-    profile_pic_url: string;
-    is_private: boolean;
-    downloaded_stories: number;
-    undownloaded_stories: number;
-    has_local: boolean;
-    is_old: boolean;
-    old_highlights: number;
-    last_updated_at: string;
-  };
-  highlights: Highlight[];
+type Highlight = CollectionSummary & { kind: "highlights" };
+type Post = CollectionSummary & { kind: "posts"; caption: string; taken_at: string };
+type LibraryEntry = Highlight | Post;
+
+type Profile = {
+  id: string;
+  username: string;
+  full_name: string;
+  profile_pic_url: string;
+  is_private: boolean;
+  has_local: boolean;
+  is_old: boolean;
+  last_updated_at: string;
+};
+
+type PageInfo = {
   page: number;
   page_size: number;
   total_pages: number;
+  has_more: boolean;
+};
+
+type HighlightScan = PageInfo & {
+  mode: "highlights";
+  profile: Profile & { downloaded_stories: number; undownloaded_stories: number; old_highlights: number };
+  highlights: Highlight[];
   total_highlights: number;
   total_stories: number;
 };
 
-type Story = {
+type PostScan = PageInfo & {
+  mode: "posts";
+  profile: Profile & { downloaded_files: number; undownloaded_files: number; old_posts: number };
+  posts: Post[];
+  total_posts: number;
+  total_files: number;
+};
+
+// Shared presentation uses neutral units; API entities retain their own definitions.
+type LibraryView = PageInfo & {
+  mode: ContentMode;
+  profile: Profile & { saved_files: number; missing_files: number; old_collections: number };
+  entries: LibraryEntry[];
+  total_entries: number;
+  total_files: number;
+};
+
+type MediaFile = {
   id: string;
   position: number;
   type: "image" | "video";
@@ -65,21 +87,20 @@ type SavedAccount = {
   id: string;
   username: string;
   full_name: string;
-  downloaded_stories: number;
+  saved_files: number;
+  saved_entries: number;
 };
 
-type StoryResult = {
-  highlight: Highlight;
-  stories: Story[];
-};
+type StoryResult = { highlight: Highlight; stories: MediaFile[] };
+type PostMediaResult = { post: Post; files: MediaFile[] };
 
 type DownloadJob = {
   status: "working" | "complete" | "partial" | "error";
-  completed_highlights: number;
-  total_highlights: number;
-  current_highlight: string;
-  current_story: number;
-  current_story_total: number;
+  completed_collections: number;
+  total_collections: number;
+  current_collection: string;
+  current_file: number;
+  current_file_total: number;
   downloaded_items: number;
   reused_items: number;
   failed_items: number;
@@ -114,7 +135,7 @@ function FolderIcon() {
   );
 }
 
-function localStatusLabel(highlight: Highlight) {
+function localStatusLabel(highlight: LibraryEntry) {
   if (highlight.local_status === "partial") {
     return `${highlight.downloaded_count}/${highlight.item_count} saved`;
   }
@@ -123,7 +144,7 @@ function localStatusLabel(highlight: Highlight) {
   return "Not downloaded";
 }
 
-function updateActionLabel(highlight: Highlight, mode: ContentMode) {
+function updateActionLabel(highlight: LibraryEntry, mode: ContentMode) {
   if (!highlight.has_local) return mode === "posts" ? "Download post" : "Download stories";
   if (highlight.local_status === "partial") return mode === "posts" ? "Get missing files" : "Get missing stories";
   return mode === "posts" ? "Update post" : "Update highlight";
@@ -159,18 +180,57 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   }
 }
 
+async function scanApi(mode: ContentMode, path: string, options?: RequestInit): Promise<LibraryView> {
+  const data = await api<HighlightScan | PostScan>(path, options);
+  if (data.mode !== mode) throw new Error(BACKEND_UPDATE_MESSAGE);
+  if (data.mode === "posts") {
+    if (!Array.isArray(data.posts) || data.posts.some((post) => post.kind !== "posts")) throw new Error(BACKEND_UPDATE_MESSAGE);
+    return {
+      ...data,
+      entries: data.posts,
+      total_entries: data.total_posts,
+      total_files: data.total_files,
+      profile: { ...data.profile, saved_files: data.profile.downloaded_files, missing_files: data.profile.undownloaded_files, old_collections: data.profile.old_posts },
+    };
+  }
+  if (!Array.isArray(data.highlights) || data.highlights.some((highlight) => highlight.kind !== "highlights")) throw new Error(BACKEND_UPDATE_MESSAGE);
+  return {
+    ...data,
+    entries: data.highlights,
+    total_entries: data.total_highlights,
+    total_files: data.total_stories,
+    profile: { ...data.profile, saved_files: data.profile.downloaded_stories, missing_files: data.profile.undownloaded_stories, old_collections: data.profile.old_highlights },
+  };
+}
+
+async function savedAccountsApi(mode: ContentMode): Promise<SavedAccount[]> {
+  type AccountSummary = Pick<SavedAccount, "id" | "username" | "full_name"> & {
+    downloaded_stories?: number; saved_highlights?: number;
+    downloaded_files?: number; saved_posts?: number;
+  };
+  const data = await api<{ mode: ContentMode; accounts: AccountSummary[] }>(`/library?mode=${mode}`);
+  if (data.mode !== mode) throw new Error(BACKEND_UPDATE_MESSAGE);
+  return data.accounts.map((account) => ({
+    id: account.id, username: account.username, full_name: account.full_name,
+    saved_files: (mode === "posts" ? account.downloaded_files : account.downloaded_stories) ?? 0,
+    saved_entries: (mode === "posts" ? account.saved_posts : account.saved_highlights) ?? 0,
+  }));
+}
+
 export default function Home() {
   const [contentMode, setContentMode] = useState<ContentMode>("highlights");
   const [libraryLoading, setLibraryLoading] = useState(true);
   const detailRequest = useRef(0);
+  const modeProfile = useRef<{ username: string; id: string; source: "saved" | "instagram" } | null>(null);
+  const [backendReady, setBackendReady] = useState(false);
   const [target, setTarget] = useState("");
   const [viewer, setViewer] = useState("");
-  const [scan, setScan] = useState<ScanResult | null>(null);
+  const [scan, setScan] = useState<LibraryView | null>(null);
   const [savedAccounts, setSavedAccounts] = useState<SavedAccount[]>([]);
   const [libraryMode, setLibraryMode] = useState<"saved" | "instagram">("saved");
-  const [activeHighlight, setActiveHighlight] = useState<Highlight | null>(null);
-  const [stories, setStories] = useState<Story[]>([]);
-  const [storiesLoading, setStoriesLoading] = useState(false);
+  const [selectedEntry, setSelectedEntry] = useState<LibraryEntry | null>(null);
+  const [mediaFiles, setMediaFiles] = useState<MediaFile[]>([]);
+  const [mediaLoading, setMediaLoading] = useState(false);
   const [downloadTarget, setDownloadTarget] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState("");
   const [downloadError, setDownloadError] = useState<{ target: string; message: string } | null>(null);
@@ -182,33 +242,39 @@ export default function Home() {
   const [verificationCode, setVerificationCode] = useState("");
   const [needsTwoFactor, setNeedsTwoFactor] = useState(false);
   const [loginLoading, setLoginLoading] = useState(false);
-  const [highlightPage, setHighlightPage] = useState(1);
-  const [highlightPageLoading, setHighlightPageLoading] = useState(false);
+  const [collectionPage, setCollectionPage] = useState(1);
+  const [pageLoading, setPageLoading] = useState(false);
   const isPosts = contentMode === "posts";
   const collectionLabel = isPosts ? "posts" : "highlights";
   const itemLabel = isPosts ? "files" : "stories";
-  const busy = status === "scanning" || highlightPageLoading || storiesLoading || downloadTarget !== null || libraryLoading;
+  const busy = status === "scanning" || pageLoading || mediaLoading || downloadTarget !== null || libraryLoading;
 
-  const totalHighlightPages = scan?.total_pages ?? 0;
-  const undownloadedStories = scan?.profile.undownloaded_stories ?? 0;
-  const canContinueDownload = Boolean(scan?.profile.has_local && undownloadedStories > 0);
-  const firstVisibleHighlight = scan
+  const totalPages = scan?.total_pages ?? 0;
+  const missingFiles = scan?.profile.missing_files ?? 0;
+  const canContinueDownload = Boolean(scan?.profile.has_local && missingFiles > 0);
+  const firstVisibleEntry = scan
     ? (scan.page - 1) * scan.page_size
     : 0;
-  const visibleHighlights = scan?.highlights ?? [];
-  const visiblePageNumbers = totalHighlightPages <= 7
-    ? Array.from({ length: totalHighlightPages }, (_, index) => index + 1)
+  const visibleEntries = scan?.entries ?? [];
+  const visiblePageNumbers = totalPages <= 7
+    ? Array.from({ length: totalPages }, (_, index) => index + 1)
     : Array.from(new Set([
         1,
-        Math.max(2, highlightPage - 1),
-        highlightPage,
-        Math.min(totalHighlightPages - 1, highlightPage + 1),
-        totalHighlightPages,
+        Math.max(2, collectionPage - 1),
+        collectionPage,
+        Math.min(totalPages - 1, collectionPage + 1),
+        totalPages,
       ])).sort((first, second) => first - second);
 
   const refreshStatus = useCallback(async () => {
     try {
-      const data = await api<{ connected: boolean; username: string | null }>("/status");
+      const data = await api<{ connected: boolean; username: string | null; api_version: number }>("/status");
+      if (data.api_version !== 5) {
+        setBackendReady(false);
+        setMessage(BACKEND_UPDATE_MESSAGE);
+        return;
+      }
+      setBackendReady(true);
       setViewer(data.connected ? data.username || "" : "");
       if (!data.connected) window.sessionStorage.removeItem(SESSION_KEY);
       setMessage("");
@@ -224,17 +290,33 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
-    api<{ accounts: SavedAccount[] }>(`/library?mode=${contentMode}`)
-      .then(async (data) => {
+    const requestedProfile = modeProfile.current;
+    savedAccountsApi(contentMode)
+      .then(async (accounts) => {
         if (!active) return;
-        setSavedAccounts(data.accounts);
-        if (data.accounts.length) {
-          const local = await api<ScanResult>(`/library/${data.accounts[0].id}?mode=${contentMode}`);
-          if (active) setScan((current) => current ?? local);
+        setSavedAccounts(accounts);
+        if (requestedProfile?.source === "instagram") {
+          const remote = await scanApi(contentMode, `/${contentMode}/scan`, {
+            method: "POST", body: JSON.stringify({ target_username: requestedProfile.username }),
+          });
+          if (active) {
+            setScan(remote);
+            setLibraryMode("instagram");
+            setStatus("idle");
+          }
+        } else {
+          const account = accounts.find((item) => item.id === requestedProfile?.id) ?? accounts[0];
+          if (account) {
+            const local = await scanApi(contentMode, `/library/${account.id}?mode=${contentMode}`);
+            if (active) setScan((current) => current ?? local);
+          }
         }
       })
-      .catch(() => {
-        if (active) setMessage("Could not load the saved library.");
+      .catch((error) => {
+        if (active) {
+          setStatus("error");
+          setMessage(error instanceof Error ? error.message : "Could not load the selected library.");
+        }
       })
       .finally(() => { if (active) setLibraryLoading(false); });
     return () => { active = false; };
@@ -243,17 +325,22 @@ export default function Home() {
   function changeMode(mode: ContentMode) {
     if (mode === contentMode || busy) return;
     detailRequest.current += 1;
+    modeProfile.current = scan ? {
+      username: scan.profile.username,
+      id: scan.profile.id,
+      source: viewer && backendReady ? "instagram" : libraryMode,
+    } : null;
     setContentMode(mode);
     setLibraryLoading(true);
     setSavedAccounts([]);
     setScan(null);
     setLibraryMode("saved");
-    setActiveHighlight(null);
-    setStories([]);
-    setHighlightPage(1);
+    setSelectedEntry(null);
+    setMediaFiles([]);
+    setCollectionPage(1);
     setDownloadError(null);
     setMessage("");
-    setStatus("idle");
+    setStatus(modeProfile.current?.source === "instagram" ? "scanning" : "idle");
   }
 
   useEffect(() => {
@@ -272,11 +359,11 @@ export default function Home() {
     setScan(null);
     setDownloadTarget(null);
     setDownloadError(null);
-    setHighlightPage(1);
-    setActiveHighlight(null);
-    setStories([]);
+    setCollectionPage(1);
+    setSelectedEntry(null);
+    setMediaFiles([]);
     try {
-      const data = await api<ScanResult>("/highlights/scan", {
+      const data = await scanApi(contentMode, `/${contentMode}/scan`, {
         method: "POST",
         body: JSON.stringify({
           target_username: target,
@@ -285,7 +372,7 @@ export default function Home() {
       });
       setScan(data);
       setLibraryMode("instagram");
-      setHighlightPage(data.page);
+      setCollectionPage(data.page);
       setStatus("idle");
     } catch (error) {
       setStatus("error");
@@ -293,49 +380,53 @@ export default function Home() {
     }
   }
 
-  async function loadStories(highlight: Highlight, profileUsername?: string) {
+  async function loadMedia(highlight: LibraryEntry, profileUsername?: string) {
     const requestId = ++detailRequest.current;
-    setActiveHighlight(highlight);
-    setStories([]);
-    setStoriesLoading(true);
+    setSelectedEntry(highlight);
+    setMediaFiles([]);
+    setMediaLoading(true);
     setMessage("");
     try {
-      const data = libraryMode === "saved"
-        ? await api<StoryResult>(`/library/${scan?.profile.id}/highlights/${highlight.id}?mode=${contentMode}`)
-        : await api<StoryResult>("/highlights/stories", {
-            method: "POST",
-            body: JSON.stringify({
-              target_username: profileUsername || scan?.profile.username || target,
-              highlight_id: highlight.id,
-              mode: contentMode,
-            }),
-          });
+      const path = libraryMode === "saved"
+        ? `/library/${scan?.profile.id}/${contentMode}/${highlight.id}`
+        : isPosts ? "/posts/media" : "/highlights/stories";
+      const data = await api<StoryResult | PostMediaResult>(path, libraryMode === "saved" ? undefined : {
+        method: "POST",
+        body: JSON.stringify({
+          target_username: profileUsername || scan?.profile.username || target,
+          ...(isPosts ? { post_id: highlight.id } : { highlight_id: highlight.id }),
+        }),
+      });
+      if (isPosts ? !("post" in data) : !("highlight" in data)) throw new Error(BACKEND_UPDATE_MESSAGE);
+      const result = "post" in data
+        ? { entry: data.post, files: data.files }
+        : { entry: data.highlight, files: data.stories };
       if (requestId !== detailRequest.current) return;
-      const updatedHighlight = {
-        ...data.highlight,
-        cover_url: highlight.cover_url || data.highlight.cover_url,
+      const updatedEntry = {
+        ...result.entry,
+        cover_url: highlight.cover_url || result.entry.cover_url,
       };
-      setActiveHighlight(updatedHighlight);
+      setSelectedEntry(updatedEntry);
       setScan((current) => {
         if (!current) return current;
-        const previous = current.highlights.find((item) => item.id === updatedHighlight.id);
+        const previous = current.entries.find((item) => item.id === updatedEntry.id);
         if (!previous) return current;
         return {
           ...current,
-          total_stories: current.total_stories - previous.item_count + updatedHighlight.item_count,
-          highlights: current.highlights.map((item) => (
-            item.id === updatedHighlight.id ? updatedHighlight : item
+          total_files: current.total_files - previous.item_count + updatedEntry.item_count,
+          entries: current.entries.map((item) => (
+            item.id === updatedEntry.id ? updatedEntry : item
           )),
         };
       });
-      setStories(data.stories);
+      setMediaFiles(result.files);
     } catch (error) {
       if (requestId !== detailRequest.current) return;
       setMessage(
         error instanceof Error ? error.message : `Could not open that ${isPosts ? "post" : "highlight"}.`,
       );
     } finally {
-      if (requestId === detailRequest.current) setStoriesLoading(false);
+      if (requestId === detailRequest.current) setMediaLoading(false);
     }
   }
 
@@ -375,25 +466,25 @@ export default function Home() {
     }
   }
 
-  async function changeHighlightPage(page: number) {
+  async function changeCollectionPage(page: number) {
     if (
       !scan
-      || highlightPageLoading
+      || pageLoading
       || downloadTarget !== null
-      || storiesLoading
-      || page === highlightPage
+      || mediaLoading
+      || page === collectionPage
       || page < 1
-      || page > totalHighlightPages
+      || page > totalPages
     ) return;
 
-    setHighlightPageLoading(true);
+    setPageLoading(true);
     setMessage("");
-    setActiveHighlight(null);
-    setStories([]);
+    setSelectedEntry(null);
+    setMediaFiles([]);
     try {
       const data = libraryMode === "saved"
-        ? await api<ScanResult>(`/library/${scan.profile.id}?page=${page}&mode=${contentMode}`)
-        : await api<ScanResult>("/highlights/page", {
+        ? await scanApi(contentMode, `/library/${scan.profile.id}?page=${page}&mode=${contentMode}`)
+        : await scanApi(contentMode, `/${contentMode}/page`, {
             method: "POST",
             body: JSON.stringify({
               target_username: scan.profile.username,
@@ -402,13 +493,13 @@ export default function Home() {
             }),
           });
       setScan(data);
-      setHighlightPage(data.page);
+      setCollectionPage(data.page);
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Could not load that highlight page.",
       );
     } finally {
-      setHighlightPageLoading(false);
+      setPageLoading(false);
     }
   }
 
@@ -426,8 +517,8 @@ export default function Home() {
       window.sessionStorage.removeItem(SESSION_KEY);
       setViewer("");
       if (libraryMode === "instagram") setScan(null);
-      setActiveHighlight(null);
-      setStories([]);
+      setSelectedEntry(null);
+      setMediaFiles([]);
       setDownloadTarget(null);
       setDownloadError(null);
       setMessage("Instagram session removed from memory.");
@@ -438,9 +529,9 @@ export default function Home() {
     highlightId: string | null = null,
     undownloadedOnly = false,
   ) {
-    if (!scan || downloadTarget) return;
+    if (!scan || downloadTarget || !backendReady || mediaLoading || pageLoading) return;
     const requestedTarget = highlightId
-      ? `highlight:${highlightId}`
+      ? `entry:${highlightId}`
       : "all";
 
     setDownloadTarget(requestedTarget);
@@ -448,11 +539,11 @@ export default function Home() {
     setDownloadError(null);
     setMessage("");
     try {
-      const data = await api<{ job_id: string }>("/library/sync", {
+      const data = await api<{ job_id: string }>(isPosts ? "/posts/sync" : "/library/sync", {
         method: "POST",
         body: JSON.stringify({
           target_username: scan.profile.username,
-          highlight_id: highlightId,
+          ...(isPosts ? { post_id: highlightId } : { highlight_id: highlightId }),
           undownloaded_only: undownloadedOnly,
           mode: contentMode,
         }),
@@ -466,30 +557,30 @@ export default function Home() {
         }
         if (job.status === "working") {
           setDownloadProgress(
-            job.current_story_total
-              ? `${job.current_story}/${job.current_story_total} · ${isPosts ? "post" : "highlight"} ${job.completed_highlights + 1}/${job.total_highlights}`
-              : job.total_highlights
-                ? job.current_highlight.startsWith("Finding posts:") ? job.current_highlight : `Checking ${job.completed_highlights + 1} of ${job.total_highlights} ${collectionLabel}…`
+            job.current_file_total
+              ? `${job.current_file}/${job.current_file_total} · ${isPosts ? "post" : "highlight"} ${job.completed_collections + 1}/${job.total_collections}`
+              : job.total_collections
+                ? job.current_collection.startsWith("Finding posts:") ? job.current_collection : `Checking ${job.completed_collections + 1} of ${job.total_collections} ${collectionLabel}…`
                 : "Refreshing account…",
           );
         }
       } while (job.status === "working");
 
-      const refreshed = await api<ScanResult>("/highlights/page", {
+      const refreshed = await scanApi(contentMode, `/${contentMode}/page`, {
         method: "POST",
         body: JSON.stringify({
           target_username: scan.profile.username,
-          page: highlightPage,
+          page: collectionPage,
           mode: contentMode,
         }),
       });
       setScan(refreshed);
-      const saved = await api<{ accounts: SavedAccount[] }>(`/library?mode=${contentMode}`);
-      setSavedAccounts(saved.accounts);
-      const refreshedActive = activeHighlight
-        ? refreshed.highlights.find((item) => item.id === activeHighlight.id)
+      const saved = await savedAccountsApi(contentMode);
+      setSavedAccounts(saved);
+      const refreshedEntry = selectedEntry
+        ? refreshed.entries.find((item) => item.id === selectedEntry.id)
         : null;
-      if (refreshedActive) await loadStories(refreshedActive, refreshed.profile.username);
+      if (refreshedEntry) await loadMedia(refreshedEntry, refreshed.profile.username);
       const summary = `${job.downloaded_items} downloaded · ${job.reused_items} already valid`;
       if (job.status === "partial") {
         setDownloadError({
@@ -532,12 +623,12 @@ export default function Home() {
     setLibraryLoading(true);
     setMessage("");
     try {
-      const local = await api<ScanResult>(`/library/${accountId}?mode=${contentMode}`);
+      const local = await scanApi(contentMode, `/library/${accountId}?mode=${contentMode}`);
       setScan(local);
       setLibraryMode("saved");
-      setHighlightPage(1);
-      setActiveHighlight(null);
-      setStories([]);
+      setCollectionPage(1);
+      setSelectedEntry(null);
+      setMediaFiles([]);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not open the saved profile.");
     } finally {
@@ -612,7 +703,7 @@ export default function Home() {
               </button>
             )}
           </div>
-          <button className="scan-button" type="submit" disabled={!target || !viewer || busy}>
+          <button className="scan-button" type="submit" disabled={!target || !viewer || !backendReady || busy}>
             {status === "scanning" ? `Finding ${collectionLabel}…` : `Show ${collectionLabel}`}
             {status !== "scanning" && <span>→</span>}
           </button>
@@ -652,7 +743,7 @@ export default function Home() {
                 onClick={() => openSavedAccount(account.id)}
               >
                 <strong>@{account.username}</strong>
-                <span>{account.downloaded_stories.toLocaleString("en-US")} saved {itemLabel}</span>
+                <span>{account.saved_entries.toLocaleString("en-US")} {collectionLabel} · {account.saved_files.toLocaleString("en-US")} saved {itemLabel}</span>
               </button>
             ))}
           </div>
@@ -673,15 +764,15 @@ export default function Home() {
                 <span className="result-owner">@{scan.profile.username}</span>
                 {scan.profile.has_local && (
                   <span className={`library-state ${scan.profile.is_old ? "is-old" : "is-current"}`}>
-                    {libraryMode === "saved" ? "Saved on this computer" : scan.profile.is_old ? `${scan.profile.old_highlights} old` : "Local copy ready"}
+                    {libraryMode === "saved" ? "Saved on this computer" : scan.profile.is_old ? `${scan.profile.old_collections} old` : "Local copy ready"}
                   </span>
                 )}
               </div>
               <h2>{scan.profile.full_name || scan.profile.username}</h2>
               <p>
                 {libraryMode === "saved"
-                  ? `${scan.total_highlights} saved ${collectionLabel} · ${scan.total_stories} saved ${itemLabel}`
-                  : `${scan.total_highlights}${scan.has_more ? "+" : ""} ${collectionLabel}${scan.has_more ? " loaded" : ""} · ${scan.total_stories} ${itemLabel}${scan.profile.has_local ? ` · ${scan.profile.downloaded_stories} saved locally` : ""}`}
+                  ? `${scan.total_entries} saved ${collectionLabel} · ${scan.total_files} saved ${itemLabel}`
+                  : `${scan.total_entries}${scan.has_more ? "+" : ""} ${collectionLabel}${scan.has_more ? " loaded" : ""} · ${scan.total_files} ${itemLabel}${scan.profile.has_local ? ` · ${scan.profile.saved_files} saved locally` : ""}`}
               </p>
             </div>
             <div className="profile-download-control">
@@ -690,10 +781,10 @@ export default function Home() {
                   type="button"
                   className="sync-button"
                   onClick={() => startDownload(null, canContinueDownload)}
-                  disabled={(!scan.total_highlights && !scan.profile.has_local) || downloadTarget !== null}
+                  disabled={(!scan.total_entries && !scan.profile.has_local) || !backendReady || busy}
                   aria-busy={downloadTarget === "all"}
                   aria-label={canContinueDownload
-                    ? `Continue download. ${undownloadedStories} ${itemLabel} left in loaded ${collectionLabel}.`
+                    ? `Continue download. ${missingFiles} ${itemLabel} left in loaded ${collectionLabel}.`
                     : undefined}
                 >
                   {downloadTarget === "all" ? (
@@ -701,7 +792,7 @@ export default function Home() {
                   ) : canContinueDownload ? (
                     <>
                       Continue download
-                      <span className="remaining-count">{undownloadedStories.toLocaleString("en-US")} {scan.has_more ? "missing in loaded posts" : "left"}</span>
+                      <span className="remaining-count">{missingFiles.toLocaleString("en-US")} {scan.has_more ? "missing in loaded posts" : "left"}</span>
                       <span aria-hidden="true">↓</span>
                     </>
                   ) : scan.profile.has_local ? (
@@ -725,35 +816,35 @@ export default function Home() {
             </div>
           </div>
 
-          {scan.highlights.length ? (
+          {scan.entries.length ? (
             <>
-              {!activeHighlight && (
+              {!selectedEntry && (
                 <p className="highlight-tip">
                   <span aria-hidden="true">↓</span>
                   <strong>Choose a {isPosts ? "post" : "highlight"}</strong> to preview its {itemLabel}
                 </p>
               )}
-              <div className={`highlight-strip ${isPosts ? "post-grid" : ""}`} aria-busy={highlightPageLoading}>
-                {highlightPageLoading ? (
+              <div className={`highlight-strip ${isPosts ? "post-grid" : ""}`} aria-busy={pageLoading}>
+                {pageLoading ? (
                   <div className="highlight-page-loading" role="status">
                     <span className="loader" />
                     Loading {isPosts ? "post" : "highlight"} page…
                   </div>
-                ) : visibleHighlights.map((highlight) => (
+                ) : visibleEntries.map((highlight) => (
                     <button
                       type="button"
-                      className={`highlight-card ${activeHighlight?.id === highlight.id ? "selected" : ""}`}
+                      className={`highlight-card ${selectedEntry?.id === highlight.id ? "selected" : ""}`}
                       key={highlight.id}
-                      onClick={() => loadStories(highlight)}
-                      disabled={highlightPageLoading || downloadTarget !== null}
-                      aria-pressed={activeHighlight?.id === highlight.id}
+                      onClick={() => loadMedia(highlight)}
+                      disabled={pageLoading || downloadTarget !== null}
+                      aria-pressed={selectedEntry?.id === highlight.id}
                     >
                       <span className="highlight-ring">
                         {highlight.cover_url ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img src={highlight.cover_url} alt="" loading="lazy" referrerPolicy="no-referrer" />
                         ) : <span className="highlight-cover-fallback"><FolderIcon /></span>}
-                        <i>{activeHighlight?.id === highlight.id ? "●" : ""}</i>
+                        <i>{selectedEntry?.id === highlight.id ? "●" : ""}</i>
                       </span>
                       <strong>{highlight.title}</strong>
                       <small>{highlight.item_count} {isPosts ? highlight.item_count === 1 ? "file" : "files" : "stories"}</small>
@@ -768,12 +859,12 @@ export default function Home() {
             <div className="empty-highlights">{libraryMode === "saved" ? `No ${collectionLabel} are saved for this profile yet.` : `This profile has no visible ${collectionLabel}.`}</div>
           )}
 
-          {totalHighlightPages > 1 && (
+          {totalPages > 1 && (
             <nav className="highlight-pagination" aria-label={`${isPosts ? "Post" : "Highlight"} pages`}>
               <button
                 type="button"
-                onClick={() => changeHighlightPage(highlightPage - 1)}
-                disabled={busy || highlightPage === 1}
+                onClick={() => changeCollectionPage(collectionPage - 1)}
+                disabled={busy || collectionPage === 1}
               >
                 Previous
               </button>
@@ -785,11 +876,11 @@ export default function Home() {
                     )}
                     <button
                       type="button"
-                      className={page === highlightPage ? "active" : ""}
-                      onClick={() => changeHighlightPage(page)}
+                      className={page === collectionPage ? "active" : ""}
+                      onClick={() => changeCollectionPage(page)}
                       disabled={busy}
                       aria-label={`Page ${page}`}
-                      aria-current={page === highlightPage ? "page" : undefined}
+                      aria-current={page === collectionPage ? "page" : undefined}
                     >
                       {page}
                     </button>
@@ -797,65 +888,65 @@ export default function Home() {
                 ))}
               </div>
               <span>
-                {firstVisibleHighlight + 1}–{Math.min(firstVisibleHighlight + scan.page_size, scan.total_highlights)} of {scan.total_highlights}{scan.has_more ? "+" : ""}
+                {firstVisibleEntry + 1}–{Math.min(firstVisibleEntry + scan.page_size, scan.total_entries)} of {scan.total_entries}{scan.has_more ? "+" : ""}
               </span>
               <button
                 type="button"
-                onClick={() => changeHighlightPage(highlightPage + 1)}
-                disabled={busy || highlightPage === totalHighlightPages}
+                onClick={() => changeCollectionPage(collectionPage + 1)}
+                disabled={busy || collectionPage === totalPages}
               >
                 Next
               </button>
             </nav>
           )}
 
-          {activeHighlight && (
+          {selectedEntry && (
             <div className={`story-browser ${isPosts ? "post-browser" : ""}`}>
               <div className="story-browser-head">
                 <div>
                   <span className="result-owner">SELECTED {isPosts ? "POST" : "HIGHLIGHT"}</span>
-                  <h3>{activeHighlight.title}</h3>
-                  <p>{activeHighlight.item_count} {libraryMode === "saved" ? `saved ${itemLabel}` : `${itemLabel} in Instagram order`}</p>
-                  {isPosts && activeHighlight.caption && <p className="post-caption">{activeHighlight.caption}</p>}
+                  <h3>{selectedEntry.title}</h3>
+                  <p>{selectedEntry.item_count} {libraryMode === "saved" ? `saved ${itemLabel}` : `${itemLabel} in Instagram order`}</p>
+                  {isPosts && (selectedEntry.kind === "posts" ? selectedEntry.caption : "") && <p className="post-caption">{(selectedEntry.kind === "posts" ? selectedEntry.caption : "")}</p>}
                 </div>
                 <div className="story-browser-actions">
-                  <span className="order-note">1 → {activeHighlight.item_count}</span>
+                  <span className="order-note">1 → {selectedEntry.item_count}</span>
                   {libraryMode === "instagram" && <button
                     type="button"
-                    onClick={() => startDownload(activeHighlight.id)}
-                    disabled={downloadTarget !== null}
-                    aria-busy={downloadTarget === `highlight:${activeHighlight.id}`}
+                    onClick={() => startDownload(selectedEntry.id)}
+                    disabled={!backendReady || busy}
+                    aria-busy={downloadTarget === `entry:${selectedEntry.id}`}
                   >
-                    {downloadTarget === `highlight:${activeHighlight.id}` ? (
+                    {downloadTarget === `entry:${selectedEntry.id}` ? (
                       <><span className="button-spinner" /> {downloadProgress}</>
                     ) : (
-                      <>{updateActionLabel(activeHighlight, contentMode)} <span>↓</span></>
+                      <>{updateActionLabel(selectedEntry, contentMode)} <span>↓</span></>
                     )}
                   </button>}
-                  {activeHighlight.has_local && (
+                  {selectedEntry.has_local && (
                     <button
                       type="button"
                       className="story-export-button"
-                      onClick={() => exportSaved(activeHighlight.id)}
+                      onClick={() => exportSaved(selectedEntry.id)}
                       disabled={downloadTarget !== null}
                     >
                       Get ZIP <span>⇩</span>
                     </button>
                   )}
-                  {downloadError?.target === `highlight:${activeHighlight.id}` && (
+                  {downloadError?.target === `entry:${selectedEntry.id}` && (
                     <p className="download-error" role="alert">{downloadError.message}</p>
                   )}
                 </div>
               </div>
 
-              {storiesLoading ? (
+              {mediaLoading ? (
                 <div className="stories-loading">
                   <span className="loader" />
                   Loading {itemLabel}…
                 </div>
               ) : (
                 <div className="story-grid">
-                  {stories.map((story) => (
+                  {mediaFiles.map((story) => (
                     <article className="story-card" key={story.id}>
                       <div className="story-media">
                         {story.type === "video" ? (
@@ -868,7 +959,7 @@ export default function Home() {
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
                             src={story.source_url}
-                            alt={`${activeHighlight.title} ${isPosts ? "file" : "story"} ${story.position}`}
+                            alt={`${selectedEntry.title} ${isPosts ? "file" : "story"} ${story.position}`}
                             loading="lazy"
                             referrerPolicy="no-referrer"
                           />
@@ -900,7 +991,7 @@ export default function Home() {
               <div>
                 <strong>{scan.profile.username}/</strong>
                 <p>
-                  {scan.profile.downloaded_stories} saved files · ordered, timestamped, ID-matched
+                  {scan.profile.saved_files} saved files · ordered, timestamped, ID-matched
                 </p>
               </div>
             </div>

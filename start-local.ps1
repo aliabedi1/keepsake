@@ -6,6 +6,11 @@ $RequirementsStamp = Join-Path $ProjectRoot '.venv\.requirements.sha256'
 
 Set-Location $ProjectRoot
 
+# Keep local services out of environment-configured proxies while allowing
+# Instagram traffic to continue through the user's VPN/proxy.
+$LocalBypass = 'localhost,127.0.0.1,::1'
+$env:NO_PROXY = (@($env:NO_PROXY, $LocalBypass) | Where-Object { $_ }) -join ','
+
 if (Test-Path $PythonExe) {
   try {
     & $PythonExe --version *> $null
@@ -73,9 +78,9 @@ try {
   }
 
   Write-Host ''
-  Write-Host 'Keepsake is starting at http://localhost:3000' -ForegroundColor Magenta
+  Write-Host 'Keepsake is starting at http://127.0.0.1:3000' -ForegroundColor Magenta
   Write-Host 'Press Ctrl+C to stop it.'
-  npx vinext dev
+  npx vinext dev --hostname 127.0.0.1 --port 3000
 }
 finally {
   Stop-Process -Id $Backend.Id -Force -ErrorAction SilentlyContinue

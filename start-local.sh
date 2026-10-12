@@ -10,6 +10,10 @@ BACKEND_PID=""
 
 cd "$PROJECT_ROOT"
 
+# Bypass environment proxies for local services; preserve external routing.
+export NO_PROXY="${NO_PROXY:-},${no_proxy:-},localhost,127.0.0.1,::1"
+export no_proxy="$NO_PROXY"
+
 if [[ ! -x "$PYTHON_EXE" ]]; then
   if ! command -v python3 >/dev/null 2>&1; then
     echo "Python 3 is required but the python3 command was not found." >&2
@@ -61,6 +65,6 @@ BACKEND_PID=$!
 export WRANGLER_LOG_PATH=".wrangler/wrangler.log"
 
 echo
-echo "Keepsake is starting at http://localhost:3000"
+echo "Keepsake is starting at http://127.0.0.1:3000"
 echo "Press Ctrl+C to stop it."
-npx vinext dev
+npx vinext dev --hostname 127.0.0.1 --port 3000

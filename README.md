@@ -29,11 +29,19 @@ Windows requires PowerShell and Python available as `python`.
    You can also right-click `start-local.ps1` and choose **Run with
    PowerShell**.
 
-3. Open [http://localhost:3000](http://localhost:3000).
+3. Open [http://127.0.0.1:3000](http://127.0.0.1:3000).
 
 The start script creates `.venv/` on the first run and updates the Python
 packages whenever `requirements.txt` changes. Press `Ctrl+C` in the PowerShell
 window to stop Keepsake.
+
+### V2Ray TUN mode
+
+Use `http://127.0.0.1:3000` while TUN mode is enabled. The web server
+binds to IPv4 loopback explicitly, avoiding VPN changes to `localhost`
+resolution. Restart Keepsake after updating to apply the server setting.
+The start scripts also bypass environment-configured proxies for local
+addresses while preserving proxy settings for Instagram requests.
 
 ## Linux installation and usage
 
@@ -61,7 +69,7 @@ Then install and start Keepsake:
    ./start-local.sh
    ```
 
-3. Open [http://localhost:3000](http://localhost:3000).
+3. Open [http://127.0.0.1:3000](http://127.0.0.1:3000).
 
 The start script creates `.venv/` on the first run and updates the Python
 packages whenever `requirements.txt` changes. Press `Ctrl+C` in the terminal
@@ -106,7 +114,7 @@ downloads/
 The platform start script (`start-local.ps1` on Windows or `start-local.sh` on
 Linux) starts the local Python backend at
 `http://127.0.0.1:8787` and the web interface at
-`http://localhost:3000`. The browser sends requests to the local backend,
+`http://127.0.0.1:3000`. The browser sends requests to the local backend,
 which creates the authenticated Instagram session and retrieves highlight
 metadata and media.
 

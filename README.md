@@ -19,7 +19,8 @@ updated dependencies.
 
 ## Windows installation and usage
 
-Windows requires PowerShell and Python available as `python`.
+For the PowerShell launcher, Windows requires PowerShell and Python 3 available
+as `python`. You can also use Git Bash with the Bash launcher described below.
 
 1. Install the JavaScript dependencies:
 
@@ -42,6 +43,25 @@ The start script creates `.venv/` on the first run and updates the Python
 packages whenever `requirements.txt` changes. Press `Ctrl+C` in the PowerShell
 window to stop Keepsake.
 
+### Windows with Git Bash
+
+Install Python 3 for Windows with PATH enabled, then reopen Git Bash so it can
+find the installation. From the project directory, run:
+
+```bash
+npm install
+./start-local.sh
+```
+
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000). The Bash launcher detects
+Windows and uses `.venv/Scripts/python.exe`. When it needs to create the virtual
+environment, it checks `python3`, `python`, and `py -3` in that order, skipping
+commands that cannot run Python 3 with the `venv` module, including unusable
+Windows Store aliases. Git Bash must also provide `sha256sum`.
+
+Like the PowerShell launcher, it installs Python dependencies on first use and
+when `requirements.txt` changes. Press `Ctrl+C` in Git Bash to stop Keepsake.
+
 ### V2Ray TUN mode
 
 Use `http://127.0.0.1:3000` while TUN mode is enabled. The web server
@@ -52,7 +72,7 @@ addresses while preserving proxy settings for Instagram requests.
 
 ## Linux installation and usage
 
-Linux requires Bash, Python available as `python3`, the Python `venv` module,
+Linux requires Bash, Python 3, the Python `venv` module,
 and `sha256sum`. On Debian and Ubuntu, you can install the operating-system
 packages with:
 
@@ -60,6 +80,10 @@ packages with:
 sudo apt update
 sudo apt install python3 python3-venv coreutils
 ```
+
+The Bash launcher checks `python3`, `python`, and `py -3` in that order when
+creating the virtual environment and uses the first working Python 3 interpreter
+with the `venv` module.
 
 Then install and start Keepsake:
 

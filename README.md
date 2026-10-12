@@ -12,12 +12,10 @@ exported as a ZIP whenever needed.
 
 ### Node.js 26 startup warning
 
-With the current Tailwind dependencies, Node.js 26 may print
-`[DEP0205] DeprecationWarning: module.register() is deprecated` during startup.
-The call comes from `@tailwindcss/node`, and the development server still starts.
-This warning can be ignored for now; no dependency patch or warning suppression
-is needed. Node.js still supports the API, but plans to remove it in a future
-version. See the [Node.js deprecation notice](https://nodejs.org/download/release/v26.9.0/docs/api/deprecations.html#dep0205-moduleregister).
+Tailwind 4.3.3 uses `module.registerHooks()` on Node.js 26, avoiding the
+`[DEP0205]` warning from older Tailwind versions. If the warning appears after
+updating Keepsake, run `npm install` and restart the local server to load the
+updated dependencies.
 
 ## Windows installation and usage
 

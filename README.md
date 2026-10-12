@@ -1,8 +1,8 @@
 # Keepsake
 
-Keepsake is a local Instagram highlight downloader for Windows and Linux.
-Connect an Instagram account, paste a profile link, browse its highlight
-stories in Instagram order, and maintain a validated local copy that can be
+Keepsake is a local Instagram highlight and post downloader for Windows and Linux.
+Connect an Instagram account, choose **Highlights** or **Posts**, paste a profile
+link, browse its media in Instagram order, and maintain a validated local copy that can be
 exported as a ZIP whenever needed.
 
 ## Requirements
@@ -86,8 +86,8 @@ to stop Keepsake.
 
 ## Use
 
-Saved highlights appear in **Saved library** when Keepsake starts. Choose a
-saved profile and highlight to browse or export downloaded stories without an
+Saved content for the selected mode appears in **Saved library** when Keepsake starts.
+Choose a saved profile and highlight or post to browse or export downloaded files without an
 Instagram login or internet connection. Keep the local app running so it can
 serve the files from `downloads/`.
 
@@ -95,12 +95,27 @@ serve the files from `downloads/`.
 2. Enter the Instagram username and password used to view the target profile.
 3. If the account uses two-factor authentication, enter its current code when
    prompted.
-4. Paste the target profile link and choose **Show highlights**.
-5. Select a highlight to browse its stories.
-6. Choose **Download stories** to create the local copy.
-7. Use **Update account** or **Update highlight** later to retrieve only files
+4. Choose **Highlights** or **Posts**, paste the target profile link, and choose
+   **Show highlights** or **Show posts**.
+5. Select a highlight or post to preview its stories or media files.
+6. Choose **Download stories** or **Download posts** to create the local copy.
+   Use **Download post** inside a selected post to save just that post.
+7. Use **Update account**, **Update highlight**, or **Update post** later to retrieve only files
    that are new, missing, or invalid.
 8. Choose **Get saved ZIP** to export files that already exist locally.
+
+Posts mode supports photo posts, videos, reels shown in the profile feed, and
+every photo or video in a carousel. Carousel files keep their slide order and
+the parent post's timestamp. Post captions are kept in the local manifest and
+shown in the preview. Highlights and posts have separate saved libraries and
+ZIP exports; switching modes keeps the same Instagram login.
+
+Post browsing fetches pages on demand and reuses pages already loaded in this
+session. A **+** beside the post count means more posts remain to be loaded.
+**Download posts** and **Update account** scan the complete profile feed in the
+background before saving files, including posts you have not browsed yet.
+**Continue download** retries missing or invalid files across the complete feed;
+while browsing a partial feed, its remaining count covers the loaded posts.
 
 The persistent local library has this structure:
 
@@ -108,6 +123,14 @@ The persistent local library has this structure:
 downloads/
 └── username__ig_123/
     ├── account.json
+    ├── posts/
+    │   └── 001__Post 20260806T091425Z__ig_321/
+    │       ├── manifest.json
+    │       ├── current/
+    │       │   ├── 0001__20260806T091425Z__ig_654.jpg
+    │       │   └── 0002__20260806T091425Z__ig_655.mp4
+    │       ├── removed/
+    │       └── corrupt/
     └── highlights/
         └── 001__Highlight name__ig_456/
             ├── manifest.json
@@ -127,7 +150,7 @@ Linux) starts the local Python backend at
 which creates the authenticated Instagram session and retrieves highlight
 metadata and media.
 
-Keepsake uses Instagram's authenticated private/mobile highlight endpoint. A
+Keepsake uses Instagram's authenticated private/mobile highlight and profile-feed endpoints. A
 profile scan is normalized once and cached in memory for the active browser
 session. Opening stories or preparing a ZIP reuses that scan instead of
 repeating the profile and highlight lookup, reducing duplicate requests that

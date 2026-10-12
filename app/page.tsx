@@ -1,10 +1,11 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import ThemeSelector from "./theme-selector";
 
 const API = "http://127.0.0.1:8787/api";
 const SESSION_KEY = "keepsake-browser-session";
+type ContentMode = "highlights" | "posts";
 
 type Highlight = {
   id: string;
@@ -19,9 +20,13 @@ type Highlight = {
   last_updated_at: string;
   is_old: boolean;
   has_local: boolean;
+  caption?: string;
+  taken_at?: string;
 };
 
 type ScanResult = {
+  mode: ContentMode;
+  has_more: boolean;
   profile: {
     id: string;
     username: string;
@@ -118,10 +123,10 @@ function localStatusLabel(highlight: Highlight) {
   return "Not downloaded";
 }
 
-function updateActionLabel(highlight?: Highlight) {
-  if (!highlight?.has_local) return "Download stories";
-  if (highlight.local_status === "partial") return "Get missing stories";
-  return "Update highlight";
+function updateActionLabel(highlight: Highlight, mode: ContentMode) {
+  if (!highlight.has_local) return mode === "posts" ? "Download post" : "Download stories";
+  if (highlight.local_status === "partial") return mode === "posts" ? "Get missing files" : "Get missing stories";
+  return mode === "posts" ? "Update post" : "Update highlight";
 }
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -155,6 +160,9 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export default function Home() {
+  const [contentMode, setContentMode] = useState<ContentMode>("highlights");
+  const [libraryLoading, setLibraryLoading] = useState(true);
+  const detailRequest = useRef(0);
   const [target, setTarget] = useState("");
   const [viewer, setViewer] = useState("");
   const [scan, setScan] = useState<ScanResult | null>(null);
@@ -176,6 +184,10 @@ export default function Home() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [highlightPage, setHighlightPage] = useState(1);
   const [highlightPageLoading, setHighlightPageLoading] = useState(false);
+  const isPosts = contentMode === "posts";
+  const collectionLabel = isPosts ? "posts" : "highlights";
+  const itemLabel = isPosts ? "files" : "stories";
+  const busy = status === "scanning" || highlightPageLoading || storiesLoading || downloadTarget !== null || libraryLoading;
 
   const totalHighlightPages = scan?.total_pages ?? 0;
   const undownloadedStories = scan?.profile.undownloaded_stories ?? 0;
@@ -212,20 +224,37 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
-    api<{ accounts: SavedAccount[] }>("/library")
+    api<{ accounts: SavedAccount[] }>(`/library?mode=${contentMode}`)
       .then(async (data) => {
         if (!active) return;
         setSavedAccounts(data.accounts);
         if (data.accounts.length) {
-          const local = await api<ScanResult>(`/library/${data.accounts[0].id}`);
+          const local = await api<ScanResult>(`/library/${data.accounts[0].id}?mode=${contentMode}`);
           if (active) setScan((current) => current ?? local);
         }
       })
       .catch(() => {
         if (active) setMessage("Could not load the saved library.");
-      });
+      })
+      .finally(() => { if (active) setLibraryLoading(false); });
     return () => { active = false; };
-  }, []);
+  }, [contentMode]);
+
+  function changeMode(mode: ContentMode) {
+    if (mode === contentMode || busy) return;
+    detailRequest.current += 1;
+    setContentMode(mode);
+    setLibraryLoading(true);
+    setSavedAccounts([]);
+    setScan(null);
+    setLibraryMode("saved");
+    setActiveHighlight(null);
+    setStories([]);
+    setHighlightPage(1);
+    setDownloadError(null);
+    setMessage("");
+    setStatus("idle");
+  }
 
   useEffect(() => {
     if (!viewer) return;
@@ -236,6 +265,8 @@ export default function Home() {
 
   async function handleScan(event: FormEvent) {
     event.preventDefault();
+    if (busy) return;
+    detailRequest.current += 1;
     setStatus("scanning");
     setMessage("");
     setScan(null);
@@ -249,6 +280,7 @@ export default function Home() {
         method: "POST",
         body: JSON.stringify({
           target_username: target,
+          mode: contentMode,
         }),
       });
       setScan(data);
@@ -257,25 +289,28 @@ export default function Home() {
       setStatus("idle");
     } catch (error) {
       setStatus("error");
-      setMessage(error instanceof Error ? error.message : "Could not load highlights.");
+      setMessage(error instanceof Error ? error.message : `Could not load ${collectionLabel}.`);
     }
   }
 
   async function loadStories(highlight: Highlight, profileUsername?: string) {
+    const requestId = ++detailRequest.current;
     setActiveHighlight(highlight);
     setStories([]);
     setStoriesLoading(true);
     setMessage("");
     try {
       const data = libraryMode === "saved"
-        ? await api<StoryResult>(`/library/${scan?.profile.id}/highlights/${highlight.id}`)
+        ? await api<StoryResult>(`/library/${scan?.profile.id}/highlights/${highlight.id}?mode=${contentMode}`)
         : await api<StoryResult>("/highlights/stories", {
             method: "POST",
             body: JSON.stringify({
               target_username: profileUsername || scan?.profile.username || target,
               highlight_id: highlight.id,
+              mode: contentMode,
             }),
           });
+      if (requestId !== detailRequest.current) return;
       const updatedHighlight = {
         ...data.highlight,
         cover_url: highlight.cover_url || data.highlight.cover_url,
@@ -295,11 +330,12 @@ export default function Home() {
       });
       setStories(data.stories);
     } catch (error) {
+      if (requestId !== detailRequest.current) return;
       setMessage(
-        error instanceof Error ? error.message : "Could not open that highlight.",
+        error instanceof Error ? error.message : `Could not open that ${isPosts ? "post" : "highlight"}.`,
       );
     } finally {
-      setStoriesLoading(false);
+      if (requestId === detailRequest.current) setStoriesLoading(false);
     }
   }
 
@@ -343,6 +379,8 @@ export default function Home() {
     if (
       !scan
       || highlightPageLoading
+      || downloadTarget !== null
+      || storiesLoading
       || page === highlightPage
       || page < 1
       || page > totalHighlightPages
@@ -354,12 +392,13 @@ export default function Home() {
     setStories([]);
     try {
       const data = libraryMode === "saved"
-        ? await api<ScanResult>(`/library/${scan.profile.id}?page=${page}`)
+        ? await api<ScanResult>(`/library/${scan.profile.id}?page=${page}&mode=${contentMode}`)
         : await api<ScanResult>("/highlights/page", {
             method: "POST",
             body: JSON.stringify({
               target_username: scan.profile.username,
               page,
+              mode: contentMode,
             }),
           });
       setScan(data);
@@ -387,6 +426,8 @@ export default function Home() {
       window.sessionStorage.removeItem(SESSION_KEY);
       setViewer("");
       if (libraryMode === "instagram") setScan(null);
+      setActiveHighlight(null);
+      setStories([]);
       setDownloadTarget(null);
       setDownloadError(null);
       setMessage("Instagram session removed from memory.");
@@ -403,7 +444,7 @@ export default function Home() {
       : "all";
 
     setDownloadTarget(requestedTarget);
-    setDownloadProgress(undownloadedOnly ? "Finding missing stories…" : "Checking Instagram…");
+    setDownloadProgress(undownloadedOnly ? `Finding missing ${itemLabel}…` : "Checking Instagram…");
     setDownloadError(null);
     setMessage("");
     try {
@@ -413,6 +454,7 @@ export default function Home() {
           target_username: scan.profile.username,
           highlight_id: highlightId,
           undownloaded_only: undownloadedOnly,
+          mode: contentMode,
         }),
       });
       let job: DownloadJob;
@@ -425,9 +467,9 @@ export default function Home() {
         if (job.status === "working") {
           setDownloadProgress(
             job.current_story_total
-              ? `${job.current_story}/${job.current_story_total} · highlight ${job.completed_highlights + 1}/${job.total_highlights}`
+              ? `${job.current_story}/${job.current_story_total} · ${isPosts ? "post" : "highlight"} ${job.completed_highlights + 1}/${job.total_highlights}`
               : job.total_highlights
-                ? `Checking ${job.completed_highlights + 1} of ${job.total_highlights} highlights…`
+                ? job.current_highlight.startsWith("Finding posts:") ? job.current_highlight : `Checking ${job.completed_highlights + 1} of ${job.total_highlights} ${collectionLabel}…`
                 : "Refreshing account…",
           );
         }
@@ -438,9 +480,12 @@ export default function Home() {
         body: JSON.stringify({
           target_username: scan.profile.username,
           page: highlightPage,
+          mode: contentMode,
         }),
       });
       setScan(refreshed);
+      const saved = await api<{ accounts: SavedAccount[] }>(`/library?mode=${contentMode}`);
+      setSavedAccounts(saved.accounts);
       const refreshedActive = activeHighlight
         ? refreshed.highlights.find((item) => item.id === activeHighlight.id)
         : null;
@@ -449,7 +494,7 @@ export default function Home() {
       if (job.status === "partial") {
         setDownloadError({
           target: requestedTarget,
-          message: job.errors?.[0] || job.error || "Some missing stories could not be downloaded.",
+          message: job.errors?.[0] || job.error || `Some missing ${itemLabel} could not be downloaded.`,
         });
       }
       setMessage(
@@ -471,6 +516,7 @@ export default function Home() {
   function exportSaved(highlightId?: string) {
     if (!scan?.profile.has_local) return;
     const url = new URL(`${API}/library/${scan.profile.id}/export`);
+    url.searchParams.set("mode", contentMode);
     if (highlightId) url.searchParams.set("highlight_id", highlightId);
     const link = document.createElement("a");
     link.href = url.toString();
@@ -482,9 +528,11 @@ export default function Home() {
   }
 
   async function openSavedAccount(accountId: string) {
+    if (busy) return;
+    setLibraryLoading(true);
     setMessage("");
     try {
-      const local = await api<ScanResult>(`/library/${accountId}`);
+      const local = await api<ScanResult>(`/library/${accountId}?mode=${contentMode}`);
       setScan(local);
       setLibraryMode("saved");
       setHighlightPage(1);
@@ -492,6 +540,8 @@ export default function Home() {
       setStories([]);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not open the saved profile.");
+    } finally {
+      setLibraryLoading(false);
     }
   }
 
@@ -509,24 +559,30 @@ export default function Home() {
       </nav>
 
       <section className="hero local-hero">
-        <div className="eyebrow"><span className="eyebrow-icon">✦</span>INSTAGRAM HIGHLIGHT ARCHIVER</div>
+        <div className="eyebrow"><span className="eyebrow-icon">✦</span>INSTAGRAM {isPosts ? "POST" : "HIGHLIGHT"} ARCHIVER</div>
         {savedAccounts.length ? (
           <>
-            <h1>Your saved stories.<br /><em>Ready offline.</em></h1>
-            <p className="intro">Browse your downloaded highlights without logging in. Connect Instagram only when you want to find or update stories.</p>
+            <h1>Your saved {isPosts ? "posts" : "stories"}.<br /><em>Ready offline.</em></h1>
+            <p className="intro">Browse your downloaded {collectionLabel} without logging in. Connect Instagram only when you want to find or update {collectionLabel}.</p>
             <a className="offline-shortcut" href="#saved-library-title">
               Browse {savedAccounts.length} saved {savedAccounts.length === 1 ? "profile" : "profiles"} <span aria-hidden="true">↓</span>
             </a>
           </>
         ) : (
           <>
-            <h1>One profile.<br /><em>Every highlight.</em></h1>
+            <h1>One profile.<br /><em>Every {isPosts ? "post" : "highlight"}.</em></h1>
             <p className="intro">
-              See highlights exactly as they’re organized on Instagram, then save
-              every story into clean, named folders on your computer.
+              {isPosts
+                ? "Browse photos, videos, reels, and carousels from a profile, then save every file into clean, named folders on your computer."
+                : "See highlights exactly as they’re organized on Instagram, then save every story into clean, named folders on your computer."}
             </p>
           </>
         )}
+
+        <div className="content-mode" role="group" aria-label="Content to download">
+          <button type="button" aria-pressed={!isPosts} disabled={busy} onClick={() => changeMode("highlights")}>Highlights</button>
+          <button type="button" aria-pressed={isPosts} disabled={busy} onClick={() => changeMode("posts")}>Posts</button>
+        </div>
 
         <form className="username-form" onSubmit={handleScan}>
           <div className="username-field">
@@ -556,8 +612,8 @@ export default function Home() {
               </button>
             )}
           </div>
-          <button className="scan-button" type="submit" disabled={!target || !viewer || status === "scanning"}>
-            {status === "scanning" ? "Finding highlights…" : "Show highlights"}
+          <button className="scan-button" type="submit" disabled={!target || !viewer || busy}>
+            {status === "scanning" ? `Finding ${collectionLabel}…` : `Show ${collectionLabel}`}
             {status !== "scanning" && <span>→</span>}
           </button>
         </form>
@@ -565,7 +621,7 @@ export default function Home() {
         <div className="connect-line">
           <span>Your Instagram login exists only in memory while this tab stays active.</span>
           {viewer ? (
-            <button type="button" onClick={disconnectSession}>Disconnect</button>
+            <button type="button" disabled={busy} onClick={disconnectSession}>Disconnect</button>
           ) : (
             <button type="button" onClick={() => setLoginOpen(true)}>Connect account</button>
           )}
@@ -584,7 +640,7 @@ export default function Home() {
           <div>
             <span className="section-number">ON THIS COMPUTER</span>
             <h2 id="saved-library-title">Saved library</h2>
-            <p>Browse downloaded highlights and stories without connecting to Instagram.</p>
+            <p>Browse downloaded {collectionLabel} and {itemLabel} without connecting to Instagram.</p>
           </div>
           <div className="saved-account-list">
             {savedAccounts.map((account) => (
@@ -592,10 +648,11 @@ export default function Home() {
                 type="button"
                 key={account.id}
                 className={libraryMode === "saved" && scan?.profile.id === account.id ? "active" : ""}
+                disabled={busy}
                 onClick={() => openSavedAccount(account.id)}
               >
                 <strong>@{account.username}</strong>
-                <span>{account.downloaded_stories.toLocaleString("en-US")} saved stories</span>
+                <span>{account.downloaded_stories.toLocaleString("en-US")} saved {itemLabel}</span>
               </button>
             ))}
           </div>
@@ -623,8 +680,8 @@ export default function Home() {
               <h2>{scan.profile.full_name || scan.profile.username}</h2>
               <p>
                 {libraryMode === "saved"
-                  ? `${scan.total_highlights} saved highlights · ${scan.total_stories} saved stories`
-                  : `${scan.total_highlights} highlights · ${scan.total_stories} on Instagram${scan.profile.has_local ? ` · ${scan.profile.downloaded_stories} saved locally` : ""}`}
+                  ? `${scan.total_highlights} saved ${collectionLabel} · ${scan.total_stories} saved ${itemLabel}`
+                  : `${scan.total_highlights}${scan.has_more ? "+" : ""} ${collectionLabel}${scan.has_more ? " loaded" : ""} · ${scan.total_stories} ${itemLabel}${scan.profile.has_local ? ` · ${scan.profile.downloaded_stories} saved locally` : ""}`}
               </p>
             </div>
             <div className="profile-download-control">
@@ -636,7 +693,7 @@ export default function Home() {
                   disabled={(!scan.total_highlights && !scan.profile.has_local) || downloadTarget !== null}
                   aria-busy={downloadTarget === "all"}
                   aria-label={canContinueDownload
-                    ? `Continue download. ${undownloadedStories} stories left.`
+                    ? `Continue download. ${undownloadedStories} ${itemLabel} left in loaded ${collectionLabel}.`
                     : undefined}
                 >
                   {downloadTarget === "all" ? (
@@ -644,13 +701,13 @@ export default function Home() {
                   ) : canContinueDownload ? (
                     <>
                       Continue download
-                      <span className="remaining-count">{undownloadedStories.toLocaleString("en-US")} left</span>
+                      <span className="remaining-count">{undownloadedStories.toLocaleString("en-US")} {scan.has_more ? "missing in loaded posts" : "left"}</span>
                       <span aria-hidden="true">↓</span>
                     </>
                   ) : scan.profile.has_local ? (
                     <>Update account <span aria-hidden="true">↻</span></>
                   ) : (
-                    <>Download stories <span aria-hidden="true">↓</span></>
+                    <>Download {isPosts ? "posts" : "stories"} <span aria-hidden="true">↓</span></>
                   )}
                 </button>}
                 <button
@@ -673,14 +730,14 @@ export default function Home() {
               {!activeHighlight && (
                 <p className="highlight-tip">
                   <span aria-hidden="true">↓</span>
-                  <strong>Choose a highlight</strong> to preview its stories
+                  <strong>Choose a {isPosts ? "post" : "highlight"}</strong> to preview its {itemLabel}
                 </p>
               )}
-              <div className="highlight-strip" aria-busy={highlightPageLoading}>
+              <div className={`highlight-strip ${isPosts ? "post-grid" : ""}`} aria-busy={highlightPageLoading}>
                 {highlightPageLoading ? (
                   <div className="highlight-page-loading" role="status">
                     <span className="loader" />
-                    Loading highlight page…
+                    Loading {isPosts ? "post" : "highlight"} page…
                   </div>
                 ) : visibleHighlights.map((highlight) => (
                     <button
@@ -688,6 +745,7 @@ export default function Home() {
                       className={`highlight-card ${activeHighlight?.id === highlight.id ? "selected" : ""}`}
                       key={highlight.id}
                       onClick={() => loadStories(highlight)}
+                      disabled={highlightPageLoading || downloadTarget !== null}
                       aria-pressed={activeHighlight?.id === highlight.id}
                     >
                       <span className="highlight-ring">
@@ -698,7 +756,7 @@ export default function Home() {
                         <i>{activeHighlight?.id === highlight.id ? "●" : ""}</i>
                       </span>
                       <strong>{highlight.title}</strong>
-                      <small>{highlight.item_count} stories</small>
+                      <small>{highlight.item_count} {isPosts ? highlight.item_count === 1 ? "file" : "files" : "stories"}</small>
                       <span className={`highlight-state state-${highlight.local_status}`}>
                         {localStatusLabel(highlight)}
                       </span>
@@ -707,15 +765,15 @@ export default function Home() {
               </div>
             </>
           ) : (
-            <div className="empty-highlights">This profile has no visible highlights.</div>
+            <div className="empty-highlights">{libraryMode === "saved" ? `No ${collectionLabel} are saved for this profile yet.` : `This profile has no visible ${collectionLabel}.`}</div>
           )}
 
           {totalHighlightPages > 1 && (
-            <nav className="highlight-pagination" aria-label="Highlight pages">
+            <nav className="highlight-pagination" aria-label={`${isPosts ? "Post" : "Highlight"} pages`}>
               <button
                 type="button"
                 onClick={() => changeHighlightPage(highlightPage - 1)}
-                disabled={highlightPageLoading || highlightPage === 1}
+                disabled={busy || highlightPage === 1}
               >
                 Previous
               </button>
@@ -729,7 +787,7 @@ export default function Home() {
                       type="button"
                       className={page === highlightPage ? "active" : ""}
                       onClick={() => changeHighlightPage(page)}
-                      disabled={highlightPageLoading}
+                      disabled={busy}
                       aria-label={`Page ${page}`}
                       aria-current={page === highlightPage ? "page" : undefined}
                     >
@@ -739,12 +797,12 @@ export default function Home() {
                 ))}
               </div>
               <span>
-                {firstVisibleHighlight + 1}–{Math.min(firstVisibleHighlight + scan.page_size, scan.total_highlights)} of {scan.total_highlights}
+                {firstVisibleHighlight + 1}–{Math.min(firstVisibleHighlight + scan.page_size, scan.total_highlights)} of {scan.total_highlights}{scan.has_more ? "+" : ""}
               </span>
               <button
                 type="button"
                 onClick={() => changeHighlightPage(highlightPage + 1)}
-                disabled={highlightPageLoading || highlightPage === totalHighlightPages}
+                disabled={busy || highlightPage === totalHighlightPages}
               >
                 Next
               </button>
@@ -752,12 +810,13 @@ export default function Home() {
           )}
 
           {activeHighlight && (
-            <div className="story-browser">
+            <div className={`story-browser ${isPosts ? "post-browser" : ""}`}>
               <div className="story-browser-head">
                 <div>
-                  <span className="result-owner">SELECTED HIGHLIGHT</span>
+                  <span className="result-owner">SELECTED {isPosts ? "POST" : "HIGHLIGHT"}</span>
                   <h3>{activeHighlight.title}</h3>
-                  <p>{activeHighlight.item_count} {libraryMode === "saved" ? "saved stories" : "stories in Instagram order"}</p>
+                  <p>{activeHighlight.item_count} {libraryMode === "saved" ? `saved ${itemLabel}` : `${itemLabel} in Instagram order`}</p>
+                  {isPosts && activeHighlight.caption && <p className="post-caption">{activeHighlight.caption}</p>}
                 </div>
                 <div className="story-browser-actions">
                   <span className="order-note">1 → {activeHighlight.item_count}</span>
@@ -770,7 +829,7 @@ export default function Home() {
                     {downloadTarget === `highlight:${activeHighlight.id}` ? (
                       <><span className="button-spinner" /> {downloadProgress}</>
                     ) : (
-                      <>{updateActionLabel(activeHighlight)} <span>↓</span></>
+                      <>{updateActionLabel(activeHighlight, contentMode)} <span>↓</span></>
                     )}
                   </button>}
                   {activeHighlight.has_local && (
@@ -792,7 +851,7 @@ export default function Home() {
               {storiesLoading ? (
                 <div className="stories-loading">
                   <span className="loader" />
-                  Loading stories…
+                  Loading {itemLabel}…
                 </div>
               ) : (
                 <div className="story-grid">
@@ -809,7 +868,8 @@ export default function Home() {
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
                             src={story.source_url}
-                            alt={`${activeHighlight.title} story ${story.position}`}
+                            alt={`${activeHighlight.title} ${isPosts ? "file" : "story"} ${story.position}`}
+                            loading="lazy"
                             referrerPolicy="no-referrer"
                           />
                         )}
@@ -852,12 +912,12 @@ export default function Home() {
         <div>
           <span className="section-number">THE OUTPUT</span>
           <h2>Your library,<br />safe between updates.</h2>
-          <p>Stories are validated and kept inside the project’s downloads folder. Updates match Instagram IDs, preserve order, and fetch only missing or invalid files.</p>
+          <p>{isPosts ? "Post files" : "Stories"} are validated and kept inside the project’s downloads folder. Updates match Instagram IDs, preserve order, and fetch only missing or invalid files.</p>
         </div>
         <pre aria-label="Example local library structure">{`downloads/
 └── username__ig_123/
-    └── highlights/
-        └── 001__Travel__ig_456/
+    └── ${collectionLabel}/
+        └── 001__${isPosts ? "Post 20260806T091425Z" : "Travel"}__ig_456/
             └── current/
                 ├── 0001__20260806T091425Z__ig_789.jpg
                 └── 0002__20260806T094102Z__ig_790.mp4`}</pre>

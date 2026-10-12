@@ -10,6 +10,15 @@ exported as a ZIP whenever needed.
 - Node.js 22.13.0 or newer, with npm
 - Python 3
 
+### Node.js 26 startup warning
+
+With the current Tailwind dependencies, Node.js 26 may print
+`[DEP0205] DeprecationWarning: module.register() is deprecated` during startup.
+The call comes from `@tailwindcss/node`, and the development server still starts.
+This warning can be ignored for now; no dependency patch or warning suppression
+is needed. Node.js still supports the API, but plans to remove it in a future
+version. See the [Node.js deprecation notice](https://nodejs.org/download/release/v26.9.0/docs/api/deprecations.html#dep0205-moduleregister).
+
 ## Windows installation and usage
 
 Windows requires PowerShell and Python available as `python`.
